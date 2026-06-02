@@ -75,6 +75,32 @@ class StateTests(unittest.TestCase):
             self.assertEqual(summary["failed"], 1)
             self.assertEqual(summary["running"], 1)
 
+    def test_claim_queued_batch_claims_same_repo_and_branch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            project = _project()
+            other_branch = ProjectConfig(
+                name=project.name,
+                enabled=True,
+                zentao_product_id=project.zentao_product_id,
+                zentao_assigned_to="",
+                repo_url=project.repo_url,
+                target_branch="release",
+                only_code_bugs=True,
+                max_bugs_per_poll=2,
+            )
+            store.enqueue_first_run(_bug(1), project)
+            store.enqueue_first_run(_bug(2), project)
+            store.enqueue_first_run(_bug(3), other_branch)
+
+            batch = store.claim_queued_batch(1)
+
+            self.assertEqual([run.bug_id for run in batch], [1, 2])
+            self.assertEqual(store.get_run(1).status, "running")
+            self.assertEqual(store.get_run(2).status, "running")
+            self.assertEqual(store.get_run(3).status, "queued")
+            self.assertEqual(store.claim_queued_batch(2), [])
+
 
 def _bug(bug_id: int) -> BugCandidate:
     return BugCandidate(

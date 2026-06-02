@@ -169,6 +169,43 @@ class StateStore:
             row = conn.execute("SELECT * FROM bug_runs WHERE bug_id = ?", (bug_id,)).fetchone()
         return _row_to_run(row) if row else None
 
+    def claim_queued_batch(self, leader_bug_id: int) -> List[RunRecord]:
+        now = utc_now()
+        with self._lock, self._connect() as conn:
+            leader = conn.execute(
+                "SELECT * FROM bug_runs WHERE bug_id = ?",
+                (leader_bug_id,),
+            ).fetchone()
+            if not leader or leader["status"] != "queued":
+                return []
+            rows = conn.execute(
+                """
+                SELECT * FROM bug_runs
+                WHERE status = 'queued'
+                  AND project_name = ?
+                  AND repo_url = ?
+                  AND target_branch = ?
+                ORDER BY first_seen_at ASC
+                """,
+                (leader["project_name"], leader["repo_url"], leader["target_branch"]),
+            ).fetchall()
+            bug_ids = [int(row["bug_id"]) for row in rows]
+            if not bug_ids:
+                return []
+            placeholders = ",".join("?" for _bug_id in bug_ids)
+            conn.execute(
+                f"""
+                UPDATE bug_runs
+                SET status = 'running',
+                    handled_once = 1,
+                    error = '',
+                    updated_at = ?
+                WHERE bug_id IN ({placeholders})
+                """,
+                [now, *bug_ids],
+            )
+        return [_row_to_run(row) for row in rows]
+
     def list_runs(self, limit: int = 100) -> List[Dict[str, Any]]:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
@@ -289,6 +326,17 @@ class StateStore:
                 (bug_id, event, message, utc_now()),
             )
 
+    def record_run_events(self, bug_ids: List[int], event: str, message: str = "") -> None:
+        now = utc_now()
+        with self._lock, self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO run_events (bug_id, event, message, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                [(bug_id, event, message, now) for bug_id in bug_ids],
+            )
+
     def list_run_events(self, bug_id: int, limit: int = 200) -> List[Dict[str, Any]]:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
@@ -380,6 +428,37 @@ class StateStore:
         values.append(bug_id)
         with self._lock, self._connect() as conn:
             conn.execute(f"UPDATE bug_runs SET {', '.join(fields)} WHERE bug_id = ?", values)
+
+    def update_statuses(
+        self,
+        bug_ids: List[int],
+        status: str,
+        *,
+        error: str = "",
+        commit_hash: str = "",
+        handled_once: Optional[bool] = None,
+        completed: bool = False,
+    ) -> None:
+        if not bug_ids:
+            return
+        fields = ["status = ?", "error = ?", "updated_at = ?"]
+        values: List[Any] = [status, error, utc_now()]
+        if commit_hash:
+            fields.append("commit_hash = ?")
+            values.append(commit_hash)
+        if handled_once is not None:
+            fields.append("handled_once = ?")
+            values.append(1 if handled_once else 0)
+        if completed:
+            fields.append("completed_at = ?")
+            values.append(utc_now())
+        placeholders = ",".join("?" for _bug_id in bug_ids)
+        values.extend(bug_ids)
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                f"UPDATE bug_runs SET {', '.join(fields)} WHERE bug_id IN ({placeholders})",
+                values,
+            )
 
 
 def _row_to_run(row: sqlite3.Row) -> RunRecord:

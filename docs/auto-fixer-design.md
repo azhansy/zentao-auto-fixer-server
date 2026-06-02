@@ -38,10 +38,11 @@ Auto Fixer Server
               |
               +-- 按 Git 项目加锁
               +-- fetch/reset 同步目标分支
-              +-- codex exec 调用 zentao-bug-fixer skill
+              +-- codex exec 调用 zentao-bug-fixer skill 一次处理同仓库批次
               +-- git diff 检查
-              +-- commit
+              +-- 批次 commit
               +-- 普通 push 到目标分支
+              +-- 批量标记禅道 Bug 为 resolved/fixed
               +-- 记录结果
 ```
 
@@ -57,7 +58,7 @@ Auto Fixer Server
 6. 如果本地没有处理记录，写入 `queued` 并投递 worker。
 7. 如果本地已经有自动处理记录，不再投递 worker。
 8. 如果本地已经处理过，但这个 Bug 又重新出现在待修复列表，标记为 `manual_required`。
-9. worker 批量处理队列里的 Bug，但同一个 Git 项目同一时间只允许一个 Bug 在执行。
+9. worker 批量处理队列里的 Bug。同一个 Git 项目同一时间只允许一个批次执行；同项目、同仓库、同分支中已经 queued 的 Bug 会合成一个批次。
 
 ## 多项目同步策略
 
@@ -101,7 +102,7 @@ Auto Fixer Server
 
 ## 批量处理策略
 
-“批量”指服务每轮可以发现并入队多个 Bug，但修复仍然按 Bug 独立提交。
+“批量”指服务每轮可以发现并入队多个 Bug，worker 会把同项目、同仓库、同分支中已经 queued 的 Bug 合成一个批次：同步一次仓库、Codex 一次性修复、验证一次、生成一个批次 commit、push 成功后再统一标记这些 Bug 为已解决。
 
 推荐顺序：
 
@@ -109,9 +110,12 @@ Auto Fixer Server
 2. 每个产品先筛选可自动修复 Bug。
 3. 每个产品按优先级、严重程度、Bug ID 排序。
 4. 每个产品最多入队 `maxBugsPerPoll` 个。
-5. worker 逐个 Bug 修复，每个 Bug 生成一个独立 commit。
+5. worker 按仓库和分支认领 queued Bug，生成一个批次。
+6. Codex 在同一个 worktree 内读取并修复批次里的全部 Bug。
+7. 批次通过验证后生成一个 commit。
+8. push 成功后，服务逐个调用禅道 resolve，把这一批 Bug 标记为 `resolved/fixed`。
 
-不要把多个不相关 Bug 合成一个 commit。这样后续如果某个修复有问题，可以按 commit 定位和回滚。
+批次 commit 的回滚粒度会变大。如果希望降低风险，应调小 `maxBugsPerPoll` 或拆分产品/分支配置。
 
 ## 自动修复条件
 
@@ -161,7 +165,7 @@ Bug 不满足以下任意情况时跳过：
 
 ## 目标分支提交
 
-不创建 MR，也不创建长期修复分支。每个 Bug 处理时使用本地临时 worktree 或本地临时分支，从远端目标分支最新提交开始：
+不创建 MR，也不创建长期修复分支。每个批次处理时使用本地临时 worktree，从远端目标分支最新提交开始：
 
 ```text
 origin/<targetBranch>
@@ -170,13 +174,16 @@ origin/<targetBranch>
 本地临时 worktree
       |
       v
-codex 修复
+codex 修复批次内全部 Bug
       |
       v
-commit: fix: zentao #{bug_id} {bug_title}
+commit: fix: zentao batch #123 #124 ...
       |
       v
 git push origin HEAD:<targetBranch>
+      |
+      v
+resolve #123 #124 ...
 ```
 
 push 失败时不做 force push。典型失败处理：
@@ -220,7 +227,7 @@ codex exec \
   --cd <worktree> \
   --ask-for-approval never \
   --sandbox danger-full-access \
-  "使用 zentao-bug-fixer skill，只处理禅道 Bug #123 ..."
+  "使用 zentao-bug-fixer skill，在同一个批次内处理禅道 Bugs #123 #124 ..."
 ```
 
 `zentao-bug-fixer` 需要的禅道环境变量由服务进程继承传递。
@@ -229,9 +236,9 @@ codex exec \
 
 直接提交目标分支比 MR 风险更高，所以第一版必须保守：
 
-- 每个 Bug 独立 commit。
+- 每个批次一个 commit。
 - 每个仓库同一时间只跑一个 Bug。
-- 每个 Bug 开始前同步远端目标分支。
+- 每个批次开始前同步远端目标分支。
 - 禁用 force push。
 - push 失败不自动覆盖远端。
 - `failed` 默认不自动重试。

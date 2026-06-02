@@ -14,6 +14,10 @@ class ZenTaoPollError(RuntimeError):
     pass
 
 
+class ZenTaoResolveError(RuntimeError):
+    pass
+
+
 def list_project_bugs(client_script: Path, project: ProjectConfig) -> List[BugCandidate]:
     try:
         return _list_project_bugs_with_helper(client_script, project)
@@ -26,6 +30,20 @@ def list_project_bugs(client_script: Path, project: ProjectConfig) -> List[BugCa
             raise ZenTaoPollError(
                 f"zentao_client failed: {helper_error}; curl fallback failed: {curl_error}"
             ) from curl_error
+
+
+def resolve_bug(client_script: Path, bug_id: int) -> None:
+    result = subprocess.run(
+        ["python3", str(client_script), "resolve", str(bug_id)],
+        env=_zentao_env(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise ZenTaoResolveError(detail or f"zentao_client resolve exited {result.returncode}")
 
 
 def _list_project_bugs_with_helper(client_script: Path, project: ProjectConfig) -> List[BugCandidate]:

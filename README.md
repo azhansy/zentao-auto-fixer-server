@@ -14,7 +14,7 @@
 4. 拉取最新代码。
 5. 让 Codex 按禅道上下文修复。
 6. 验证、提交、推送。
-7. 给禅道写原因和解决方案，必要时标记为已解决。
+7. 给禅道写原因和解决方案，并在整批 push 成功后统一标记为已解决。
 
 本服务把这些步骤串起来，适合自部署禅道 + 自部署 GitLab 的团队在内网机器上运行。它不依赖禅道 webhook，也不要求禅道能访问你的本机。
 
@@ -60,13 +60,14 @@ ZenTao Auto Fixer Server
                 |
                 +-- 同步 Git 仓库目标分支
                 +-- 创建临时 worktree
-                +-- 调用 codex exec + zentao-bug-fixer
-                +-- 提交修复 commit
+                +-- 调用 codex exec + zentao-bug-fixer 一次处理整批 Bug
+                +-- 提交批次修复 commit
                 +-- push 到目标分支
+                +-- 批量标记禅道 Bug 为 resolved/fixed
                 +-- 记录处理状态和事件日志
 ```
 
-每个 Bug 单独处理、单独提交。不同 Git 仓库可以并行处理；同一个 Git 仓库会串行处理，避免多个 Bug 同时改同一条目标分支。
+同一个项目、同一个 Git 仓库、同一个目标分支中已经入队的 Bug 会合成一个批次处理：同步一次仓库，Codex 一次性修复这一批 Bug，验证通过后生成一个批次 commit 并 push。不同 Git 仓库可以并行处理；同一个 Git 仓库仍然串行，避免多个批次同时改同一条目标分支。
 
 ## 不做什么
 
@@ -80,7 +81,7 @@ ZenTao Auto Fixer Server
 - 不把禅道账号密码、token、GitLab token 写进代码。
 - 不重新实现 `zentao-bug-fixer` 的修复逻辑。
 
-如果 `ZENTAO_RESOLVE_BUG_AFTER_COMMENT=1`，`zentao-bug-fixer` 会在写备注后把 Bug 标记为 `resolved/fixed`。最终关闭 `closed` 通常仍由 QA 或人工确认。
+批次处理时，服务会强制 Codex 子进程只写禅道备注，不提前 resolve。只有当整批代码 commit 并 push 成功后，服务才会逐个把这一批 Bug 标记为 `resolved/fixed`。最终关闭 `closed` 通常仍由 QA 或人工确认。
 
 ## 快速启动
 
@@ -102,7 +103,7 @@ ZENTAO_ACCOUNT=your-account
 ZENTAO_PASSWORD=your-password
 ZENTAO_API_PREFIX=/api.php/v1
 
-ZENTAO_RESOLVE_BUG_AFTER_COMMENT=1
+ZENTAO_RESOLVE_BUG_AFTER_COMMENT=0
 ZENTAO_RESOLVED_BUILD=主干
 ```
 
@@ -159,12 +160,13 @@ python3 -m zentao_auto_fixer.server
 | `AUTO_FIXER_WORKERS` | 后台 worker 数量。 |
 | `AUTO_FIXER_PROJECTS_FILE` | 多项目映射文件路径。 |
 | `AUTO_FIXER_CODEX_BIN` | Codex CLI 路径，默认 `codex`。 |
+| `AUTO_FIXER_CODEX_TIMEOUT_SECONDS` | Codex 单次执行最长时间，默认 `1800` 秒；设为 `0` 表示不限制。 |
 | `AUTO_FIXER_ZENTAO_CLIENT` | `zentao-bug-fixer` skill 的禅道 helper 路径，默认可填 `auto`。 |
 | `AUTO_FIXER_RETRY_FAILED` | 失败任务是否允许下一轮自动重试，默认建议 `0`。 |
 | `ZENTAO_BASE_URL` | 禅道根地址。 |
 | `ZENTAO_ACCOUNT` / `ZENTAO_PASSWORD` | 禅道账号密码。 |
 | `ZENTAO_API_PREFIX` | 禅道 REST API 前缀，常见为 `/api.php/v1`。 |
-| `ZENTAO_RESOLVE_BUG_AFTER_COMMENT` | 是否在写备注后自动解决 Bug。 |
+| `ZENTAO_RESOLVE_BUG_AFTER_COMMENT` | 建议保持 `0`；批次模式下服务会在 push 成功后统一 resolve。 |
 | `ZENTAO_RESOLVED_BUILD` | 自动解决 Bug 时使用的 `resolvedBuild`。 |
 
 完整说明见 [.env.example](.env.example)。
@@ -246,6 +248,8 @@ tail -f .auto-fixer/logs/bug-<bug_id>-codex.log
 | `manual_required` | 需要人工处理，例如自动修复后又被激活。 |
 | `failed` | 处理失败，查看 `error` 和 codex log。 |
 
+如果某个 Bug 的 `events` 长时间停在 `codex_attempt`，同时 Codex 日志没有继续更新，通常表示 `codex exec` 卡住了。可以通过 `AUTO_FIXER_CODEX_TIMEOUT_SECONDS` 设置单次最长执行时间。超时后服务会终止当前 Codex 进程及其子进程，释放同仓库队列；如果 `AUTO_FIXER_CODEX_ATTEMPTS` 大于 1，会在同一个批次 worktree 内继续下一次尝试。
+
 ## 本地数据
 
 默认数据目录是 `.auto-fixer`：
@@ -276,14 +280,14 @@ tail -f .auto-fixer/logs/bug-<bug_id>-codex.log
 
 建议先在禅道里明确哪些 Bug 类型属于代码问题。服务默认只处理代码类 Bug，避免把需求、配置、环境、测试数据问题交给自动修复。
 
-如果希望修复后自动进入已解决状态，设置：
+如果希望批次 push 成功后自动进入已解决状态，保持：
 
 ```bash
-ZENTAO_RESOLVE_BUG_AFTER_COMMENT=1
+ZENTAO_RESOLVE_BUG_AFTER_COMMENT=0
 ZENTAO_RESOLVED_BUILD=主干
 ```
 
-这会调用 `zentao-bug-fixer` skill 的 resolve 能力，把 Bug 标记为 `resolved/fixed`。它不会执行最终关闭。
+批次模式下，Codex 子进程会被强制只写备注，不提前 resolve；外层服务在 commit 和 push 成功后调用 `zentao-bug-fixer` skill 的 resolve 能力，把这一批 Bug 标记为 `resolved/fixed`。它不会执行最终关闭。
 
 ## 本机、内网和不同局域网
 

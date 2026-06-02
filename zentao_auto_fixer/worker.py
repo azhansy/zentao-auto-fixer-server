@@ -7,7 +7,7 @@ import time
 import traceback
 from typing import Dict, List, Optional
 
-from .codex_runner import CodexError, run_codex_fix
+from .codex_runner import CodexError, run_codex_batch_fix
 from .config import Settings
 from .git_ops import (
     GitError,
@@ -20,6 +20,7 @@ from .git_ops import (
     repo_cache_name,
 )
 from .state import StateStore
+from .zentao import ZenTaoResolveError, resolve_bug
 
 
 LOGGER = logging.getLogger("zentao_auto_fixer.worker")
@@ -73,7 +74,7 @@ class Worker:
 
     def _process_bug(self, bug_id: int) -> None:
         run = self.state.get_run(bug_id)
-        if not run:
+        if not run or run.status != "queued":
             return
         config_error = self.settings.validate_for_worker()
         if config_error:
@@ -84,104 +85,111 @@ class Worker:
 
         self.state.record_run_event(bug_id, "waiting_repo_lock", run.repo_url)
         with self._lock_for_repo(run.repo_url):
-            self._process_bug_with_repo_lock(bug_id)
+            self._process_batch_with_repo_lock(bug_id)
 
-    def _process_bug_with_repo_lock(self, bug_id: int) -> None:
-        run = self.state.get_run(bug_id)
-        if not run:
+    def _process_batch_with_repo_lock(self, leader_bug_id: int) -> None:
+        batch = self.state.claim_queued_batch(leader_bug_id)
+        if not batch:
             return
-        self.state.update_status(bug_id, "running", handled_once=True)
-        self.state.record_run_event(
-            bug_id,
+        first = batch[0]
+        bug_ids = [run.bug_id for run in batch]
+        batch_label = _batch_label(batch)
+        self.state.record_run_events(
+            bug_ids,
             "started",
-            f"project={run.project_name} branch={run.target_branch}",
+            f"batch={batch_label} project={first.project_name} branch={first.target_branch}",
         )
         LOGGER.info(
-            "Worker started bug #%s project=%s branch=%s",
-            bug_id,
-            run.project_name,
-            run.target_branch,
+            "Worker started batch %s project=%s branch=%s",
+            batch_label,
+            first.project_name,
+            first.target_branch,
         )
-        repo_cache = self.settings.repo_cache_dir / repo_cache_name(run.repo_url)
+        repo_cache = self.settings.repo_cache_dir / repo_cache_name(first.repo_url)
         worktree = None
         try:
-            LOGGER.info("Bug #%s syncing repo %s", bug_id, run.repo_url)
-            self.state.record_run_event(bug_id, "sync_repo", run.repo_url)
+            LOGGER.info("Batch %s syncing repo %s", batch_label, first.repo_url)
+            self.state.record_run_events(bug_ids, "sync_repo", first.repo_url)
             sync_result = ensure_repo_cache(
-                run.repo_url,
+                first.repo_url,
                 repo_cache,
-                run.target_branch,
+                first.target_branch,
                 timeout=self.settings.git_timeout_seconds,
                 shallow=self.settings.git_shallow_clone,
             )
-            self.state.record_run_event(
-                bug_id,
+            self.state.record_run_events(
+                bug_ids,
                 f"repo_{sync_result.action}",
                 str(sync_result.path),
             )
-            self.state.record_run_event(bug_id, "create_worktree", str(self.settings.worktree_dir))
+            self.state.record_run_events(bug_ids, "create_worktree", str(self.settings.worktree_dir))
             worktree = create_detached_worktree(
                 repo_cache,
                 self.settings.worktree_dir,
-                f"{run.project_name}-zentao-{bug_id}",
-                run.target_branch,
+                f"{first.project_name}-zentao-batch-{bug_ids[0]}-{bug_ids[-1]}",
+                first.target_branch,
             )
 
-            codex_log = self.settings.logs_dir / f"bug-{bug_id}-codex.log"
-            self.state.record_run_event(bug_id, "codex_start", str(codex_log))
-            self._run_codex_with_retries(bug_id, worktree, run.title, codex_log)
-            self.state.record_run_event(bug_id, "codex_done", str(worktree))
+            codex_log = self.settings.logs_dir / f"batch-{bug_ids[0]}-{bug_ids[-1]}-codex.log"
+            self.state.record_run_events(bug_ids, "codex_start", str(codex_log))
+            self._run_codex_batch_with_retries(batch, worktree, codex_log)
+            self.state.record_run_events(bug_ids, "codex_done", str(worktree))
             if not has_changes(worktree):
-                self.state.update_status(
-                    bug_id,
+                self.state.update_statuses(
+                    bug_ids,
                     "no_changes",
                     error="Codex finished but no git changes were produced",
                     handled_once=True,
                     completed=True,
                 )
-                self.state.record_run_event(bug_id, "no_changes", "Codex finished but no git changes were produced")
-                LOGGER.info("Worker finished bug #%s with no changes", bug_id)
+                self.state.record_run_events(bug_ids, "no_changes", "Codex finished but no git changes were produced")
+                LOGGER.info("Worker finished batch %s with no changes", batch_label)
                 return
 
-            commit_message = f"fix: zentao #{bug_id} {run.title}"
-            self.state.record_run_event(bug_id, "commit_start", commit_message)
+            commit_message = f"fix: zentao batch {batch_label}"
+            self.state.record_run_events(bug_ids, "commit_start", commit_message)
             commit_hash = commit_all(
                 worktree,
                 commit_message,
                 self.settings.git_author_name,
                 self.settings.git_author_email,
             )
-            self.state.record_run_event(bug_id, "commit_done", commit_hash)
+            self.state.record_run_events(bug_ids, "commit_done", commit_hash)
             try:
-                self.state.record_run_event(bug_id, "push_start", run.target_branch)
-                push_head_to_branch(worktree, run.target_branch)
+                self.state.record_run_events(bug_ids, "push_start", first.target_branch)
+                push_head_to_branch(worktree, first.target_branch)
             except GitError as exc:
                 status = "sync_conflict" if _looks_like_non_fast_forward(str(exc)) else "failed"
-                self.state.update_status(
-                    bug_id,
+                self.state.update_statuses(
+                    bug_ids,
                     status,
                     error=str(exc),
                     commit_hash=commit_hash,
                     handled_once=True,
                     completed=True,
                 )
-                self.state.record_run_event(bug_id, status, str(exc))
-                LOGGER.error("Worker push failed bug #%s status=%s: %s", bug_id, status, exc)
+                self.state.record_run_events(bug_ids, status, str(exc))
+                LOGGER.error("Worker push failed batch %s status=%s: %s", batch_label, status, exc)
                 return
 
-            self.state.update_status(
-                bug_id,
-                "pushed",
-                commit_hash=commit_hash,
+            self.state.record_run_events(bug_ids, "pushed", commit_hash)
+            self._resolve_batch_after_push(batch, commit_hash)
+            LOGGER.info("Worker pushed batch %s commit=%s", batch_label, commit_hash)
+        except Exception as exc:
+            error = f"{exc}\n{traceback.format_exc()}"
+            self.state.update_statuses(
+                bug_ids,
+                "failed",
+                error=error,
                 handled_once=True,
                 completed=True,
             )
-            self.state.record_run_event(bug_id, "pushed", commit_hash)
-            LOGGER.info("Worker pushed bug #%s commit=%s", bug_id, commit_hash)
+            self.state.record_run_events(bug_ids, "failed", str(exc))
+            LOGGER.error("Worker failed batch %s: %s", batch_label, exc)
         finally:
             if worktree is not None:
                 remove_worktree(repo_cache, worktree)
-                self.state.record_run_event(bug_id, "cleanup_worktree", str(worktree))
+                self.state.record_run_events(bug_ids, "cleanup_worktree", str(worktree))
 
     def _lock_for_repo(self, repo_url: str) -> threading.Lock:
         with self._repo_locks_guard:
@@ -189,21 +197,30 @@ class Worker:
                 self._repo_locks[repo_url] = threading.Lock()
             return self._repo_locks[repo_url]
 
-    def _run_codex_with_retries(self, bug_id: int, worktree, title: str, codex_log) -> None:
+    def _run_codex_batch_with_retries(self, batch, worktree, codex_log) -> None:
         last_error: Optional[CodexError] = None
+        bug_ids = [run.bug_id for run in batch]
+        bugs = [(run.bug_id, run.title) for run in batch]
         for attempt in range(1, self.settings.codex_attempts + 1):
-            self.state.record_run_event(
-                bug_id,
+            self.state.record_run_events(
+                bug_ids,
                 "codex_attempt",
                 f"{attempt}/{self.settings.codex_attempts}",
             )
             try:
-                run_codex_fix(self.settings.codex_bin, worktree, bug_id, title, codex_log)
+                run_codex_batch_fix(
+                    self.settings.codex_bin,
+                    worktree,
+                    bugs,
+                    codex_log,
+                    timeout_seconds=self.settings.codex_timeout_seconds,
+                    env_overrides={"ZENTAO_RESOLVE_BUG_AFTER_COMMENT": "0"},
+                )
                 return
             except CodexError as exc:
                 last_error = exc
-                self.state.record_run_event(
-                    bug_id,
+                self.state.record_run_events(
+                    bug_ids,
                     "codex_attempt_failed",
                     f"{attempt}/{self.settings.codex_attempts}: {exc}",
                 )
@@ -212,8 +229,32 @@ class Worker:
         assert last_error is not None
         raise last_error
 
+    def _resolve_batch_after_push(self, batch, commit_hash: str) -> None:
+        for run in batch:
+            error = ""
+            self.state.record_run_event(run.bug_id, "resolve_start", "Marking ZenTao bug resolved after batch push")
+            try:
+                resolve_bug(self.settings.zentao_client_script, run.bug_id)
+                self.state.record_run_event(run.bug_id, "resolve_done", "resolved/fixed")
+            except ZenTaoResolveError as exc:
+                error = str(exc)
+                self.state.record_run_event(run.bug_id, "resolve_failed", error)
+                LOGGER.error("Resolve failed bug #%s after batch push: %s", run.bug_id, exc)
+            self.state.update_status(
+                run.bug_id,
+                "pushed",
+                error=error,
+                commit_hash=commit_hash,
+                handled_once=True,
+                completed=True,
+            )
+
 
 def _looks_like_non_fast_forward(error: str) -> bool:
     lowered = error.lower()
     markers = ("non-fast-forward", "fetch first", "stale info", "rejected")
     return any(marker in lowered for marker in markers)
+
+
+def _batch_label(batch) -> str:
+    return " ".join(f"#{run.bug_id}" for run in batch)

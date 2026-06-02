@@ -6,7 +6,7 @@ import signal
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from .config import Settings
@@ -148,9 +148,10 @@ def _log_startup(settings: Settings) -> None:
         settings.poll_interval_seconds,
     )
     LOGGER.info(
-        "配置：workers=%s enabled_projects=%s projects_file=%s data_dir=%s",
+        "配置：workers=%s enabled_projects=%s codex_timeout=%s projects_file=%s data_dir=%s",
         settings.worker_count,
         _enabled_project_count(settings),
+        _format_timeout(settings.codex_timeout_seconds),
         settings.projects_file,
         settings.data_dir,
     )
@@ -162,6 +163,10 @@ def _enabled_project_count(settings: Settings) -> int:
     except Exception:
         LOGGER.exception("读取项目配置失败")
         return 0
+
+
+def _format_timeout(timeout_seconds: Optional[int]) -> str:
+    return "disabled" if timeout_seconds is None else f"{timeout_seconds}s"
 
 
 def _log_shutdown_summary(app: App) -> None:

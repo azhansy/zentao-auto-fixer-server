@@ -17,6 +17,16 @@ def _bool_env(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _optional_positive_int_env(name: str, default: int) -> Optional[int]:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    parsed = int(value)
+    if parsed <= 0:
+        return None
+    return parsed
+
+
 @dataclass(frozen=True)
 class Settings:
     host: str
@@ -33,6 +43,7 @@ class Settings:
     codex_bin: str
     codex_attempts: int
     codex_retry_delay_seconds: int
+    codex_timeout_seconds: Optional[int]
     zentao_client_script: Path
     git_timeout_seconds: int
     git_shallow_clone: bool
@@ -59,6 +70,7 @@ class Settings:
             codex_bin=os.getenv("AUTO_FIXER_CODEX_BIN", "codex"),
             codex_attempts=max(1, int(os.getenv("AUTO_FIXER_CODEX_ATTEMPTS", "3"))),
             codex_retry_delay_seconds=max(0, int(os.getenv("AUTO_FIXER_CODEX_RETRY_DELAY_SECONDS", "15"))),
+            codex_timeout_seconds=_optional_positive_int_env("AUTO_FIXER_CODEX_TIMEOUT_SECONDS", 1800),
             zentao_client_script=_zentao_client_script_from_env(),
             git_timeout_seconds=max(30, int(os.getenv("AUTO_FIXER_GIT_TIMEOUT_SECONDS", "1800"))),
             git_shallow_clone=_bool_env("AUTO_FIXER_GIT_SHALLOW_CLONE", True),

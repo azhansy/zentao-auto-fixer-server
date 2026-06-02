@@ -53,6 +53,19 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(str(settings.zentao_client_script).endswith("zentao_client.py"))
         self.assertIn(".codex/skills/zentao-bug-fixer", str(settings.zentao_client_script))
 
+    def test_codex_timeout_can_be_configured_or_disabled(self):
+        old = os.environ.get("AUTO_FIXER_CODEX_TIMEOUT_SECONDS")
+        try:
+            os.environ["AUTO_FIXER_CODEX_TIMEOUT_SECONDS"] = "90"
+            self.assertEqual(Settings.from_env().codex_timeout_seconds, 90)
+            os.environ["AUTO_FIXER_CODEX_TIMEOUT_SECONDS"] = "0"
+            self.assertIsNone(Settings.from_env().codex_timeout_seconds)
+        finally:
+            if old is None:
+                os.environ.pop("AUTO_FIXER_CODEX_TIMEOUT_SECONDS", None)
+            else:
+                os.environ["AUTO_FIXER_CODEX_TIMEOUT_SECONDS"] = old
+
 
 if __name__ == "__main__":
     unittest.main()
