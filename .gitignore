@@ -1,0 +1,9 @@
+.env
+projects.json
+.auto-fixer/
+.idea/
+__pycache__/
+.pycache-compile/
+*.py[cod]
+.pytest_cache/
+.DS_Store

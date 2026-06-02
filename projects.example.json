@@ -1,0 +1,24 @@
+{
+  "projects": [
+    {
+      "name": "Example Product A",
+      "enabled": true,
+      "zentaoProductId": 8,
+      "zentaoAssignedTo": "",
+      "repoUrl": "git@github.com:group/product-a.git",
+      "targetBranch": "dev",
+      "onlyCodeBugs": true,
+      "maxBugsPerPoll": 3
+    },
+    {
+      "name": "Example Product B",
+      "enabled": true,
+      "zentaoProductId": 12,
+      "zentaoAssignedTo": "",
+      "repoUrl": "git@github.com:group/product-b.git",
+      "targetBranch": "main",
+      "onlyCodeBugs": true,
+      "maxBugsPerPoll": 2
+    }
+  ]
+}
