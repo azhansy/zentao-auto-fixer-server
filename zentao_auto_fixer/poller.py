@@ -6,10 +6,15 @@ import time
 from typing import Any, Optional
 
 from .config import Settings
-from .models import AUTO_FIXED_STATUSES, BugCandidate, ProjectConfig
+from .models import AUTO_FIXED_STATUSES, BugCandidate, ProjectConfig, platforms_of
+
+
+# Outcomes that never resolve themselves: without this the bug would sit on the AI
+# account forever, unfixed and unreported.
+STUCK_STATUSES = {"sync_conflict", "writeback_failed"}
 from .state import StateStore, utc_now
 from .worker import Worker
-from .zentao import list_project_bugs
+from .zentao import ZenTaoPollError, bug_has_ai_comment, list_project_bugs
 
 
 LOGGER = logging.getLogger("zentao_auto_fixer.poller")
@@ -50,6 +55,24 @@ class Poller:
             wait_seconds = max(1, self.settings.poll_interval_seconds - int(elapsed))
             self._stop.wait(wait_seconds)
 
+    def _already_handled_in_zentao(self, bug: BugCandidate, project: ProjectConfig) -> str:
+        """A ZenTao comment from the AI means this bug was already handled once; leave it to a human."""
+        try:
+            handled = bug_has_ai_comment(self.settings.zentao_client_script, bug.bug_id)
+        except ZenTaoPollError as exc:
+            LOGGER.warning("Could not read bug #%s history, skipping this round: %s", bug.bug_id, exc)
+            return "unknown"
+        if not handled:
+            return "fresh"
+        if self.state.record_already_handled_in_zentao(bug, project):
+            self.state.record_run_event(
+                bug.bug_id,
+                "already_handled_in_zentao",
+                "ZenTao comments already carry the AI marker; not fixing again.",
+            )
+            LOGGER.info("Bug #%s already has an AI comment in ZenTao, skipping", bug.bug_id)
+        return "handled"
+
     def _poll_project(self, project: ProjectConfig) -> None:
         started_at = utc_now()
         total = 0
@@ -58,6 +81,7 @@ class Poller:
         queued = 0
         skipped_existing = 0
         skipped_resolved = 0
+        skipped_platform = 0
         marked_manual = 0
         requeued_failed = 0
         try:
@@ -68,9 +92,13 @@ class Poller:
                     skipped_resolved += 1
                     continue
                 existing = self.state.get_run(bug.bug_id)
-                unresolved = _is_unresolved(bug)
+                active = _is_active(bug)
 
-                if not unresolved:
+                if active and project.skips_platforms(platforms_of(bug.title)):
+                    skipped_platform += 1
+                    continue
+
+                if not active:
                     skipped_resolved += 1
                     if existing and existing.status in AUTO_FIXED_STATUSES:
                         self.state.mark_seen_resolved_once(bug.bug_id, bug.status)
@@ -80,13 +108,31 @@ class Poller:
                 candidate_count += 1
 
                 if existing:
-                    if self.state.should_mark_manual_required(bug.bug_id):
+                    if existing.status in STUCK_STATUSES:
                         self.state.mark_manual_required(
                             bug.bug_id,
-                            "Bug was already automatically fixed once and later appeared unresolved again.",
+                            f"Last automatic attempt ended as {existing.status}; a human has to take it from here.",
+                        )
+                        self.state.record_run_event(
+                            bug.bug_id,
+                            "stuck_marked_manual",
+                            f"{existing.status}: {existing.error[:200]}",
                         )
                         marked_manual += 1
+                        continue
+                    if self.state.should_mark_manual_required(bug.bug_id):
+                        reason = (
+                            f"AI already fixed this bug once (status={existing.status}, "
+                            f"commit={existing.commit_hash or 'n/a'}) and it is active again; "
+                            "verification did not pass, so it needs a human."
+                        )
+                        self.state.mark_manual_required(bug.bug_id, reason)
+                        self.state.record_run_event(bug.bug_id, "reopened_after_auto_fix", reason)
+                        marked_manual += 1
                     elif existing.status == "failed" and self.settings.retry_failed:
+                        if self._already_handled_in_zentao(bug, project) != "fresh":
+                            skipped_existing += 1
+                            continue
                         if self.state.requeue_failed(bug, project):
                             self.worker.enqueue(bug.bug_id)
                             queued += 1
@@ -98,6 +144,13 @@ class Poller:
                     continue
 
                 if queued >= project.max_bugs_per_poll:
+                    skipped_existing += 1
+                    continue
+                zentao_state = self._already_handled_in_zentao(bug, project)
+                if zentao_state == "handled":
+                    marked_manual += 1
+                    continue
+                if zentao_state == "unknown":
                     skipped_existing += 1
                     continue
                 if self.state.enqueue_first_run(bug, project):
@@ -120,12 +173,12 @@ class Poller:
                 candidate_bugs=candidate_count,
                 queued_bugs=queued,
                 skipped_existing=skipped_existing,
-                skipped_resolved=skipped_resolved,
+                skipped_resolved=skipped_resolved + skipped_platform,
                 marked_manual=marked_manual,
                 requeued_failed=requeued_failed,
             )
             LOGGER.info(
-                "Polled %s: total=%s unresolved=%s queued=%s existing=%s resolved=%s manual=%s",
+                "Polled %s: total=%s unresolved=%s queued=%s existing=%s resolved=%s manual=%s platform_skipped=%s",
                 project.name,
                 total,
                 unresolved_count,
@@ -133,6 +186,7 @@ class Poller:
                 skipped_existing,
                 skipped_resolved,
                 marked_manual,
+                skipped_platform,
             )
         except Exception as exc:
             self.state.record_poll_run(
@@ -145,7 +199,7 @@ class Poller:
                 candidate_bugs=candidate_count,
                 queued_bugs=queued,
                 skipped_existing=skipped_existing,
-                skipped_resolved=skipped_resolved,
+                skipped_resolved=skipped_resolved + skipped_platform,
                 marked_manual=marked_manual,
                 requeued_failed=requeued_failed,
                 error=str(exc),
@@ -153,9 +207,8 @@ class Poller:
             raise
 
 
-def _is_unresolved(bug: BugCandidate) -> bool:
-    status = bug.status.lower()
-    if status in {"closed", "resolved", "done"}:
+def _is_active(bug: BugCandidate) -> bool:
+    if bug.status.strip().lower() != "active":
         return False
     raw = bug.raw
     if _has_value(raw.get("closedBy")) or _has_value(raw.get("closed_by")):

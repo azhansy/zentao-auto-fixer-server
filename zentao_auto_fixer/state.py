@@ -41,6 +41,8 @@ class StateStore:
                     bug_status TEXT NOT NULL DEFAULT '',
                     repo_url TEXT NOT NULL DEFAULT '',
                     target_branch TEXT NOT NULL DEFAULT '',
+                    opened_by TEXT NOT NULL DEFAULT '',
+                    triage_targets TEXT NOT NULL DEFAULT '',
                     commit_hash TEXT NOT NULL DEFAULT '',
                     error TEXT NOT NULL DEFAULT '',
                     handled_once INTEGER NOT NULL DEFAULT 0,
@@ -98,6 +100,8 @@ class StateStore:
             "bug_status": "TEXT NOT NULL DEFAULT ''",
             "commit_hash": "TEXT NOT NULL DEFAULT ''",
             "seen_resolved_once": "INTEGER NOT NULL DEFAULT 0",
+            "opened_by": "TEXT NOT NULL DEFAULT ''",
+            "triage_targets": "TEXT NOT NULL DEFAULT ''",
         }
         for name, definition in additions.items():
             if name not in existing:
@@ -112,9 +116,9 @@ class StateStore:
                     INSERT INTO bug_runs (
                         bug_id, title, status, project_name, event_action, product_id,
                         assigned_to, bug_type, bug_status, repo_url, target_branch,
-                        first_seen_at, updated_at
+                        opened_by, first_seen_at, updated_at
                     )
-                    VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         bug.bug_id,
@@ -127,6 +131,7 @@ class StateStore:
                         bug.status,
                         project.repo_url,
                         project.target_branch,
+                        bug.opened_by,
                         now,
                         now,
                     ),
@@ -146,7 +151,8 @@ class StateStore:
                 UPDATE bug_runs
                 SET title = ?, status = 'queued', project_name = ?, product_id = ?,
                     assigned_to = ?, bug_type = ?, bug_status = ?, repo_url = ?,
-                    target_branch = ?, error = '', updated_at = ?, completed_at = NULL
+                    target_branch = ?, opened_by = ?, error = '', updated_at = ?,
+                    completed_at = NULL
                 WHERE bug_id = ?
                 """,
                 (
@@ -158,18 +164,31 @@ class StateStore:
                     bug.status,
                     project.repo_url,
                     project.target_branch,
+                    bug.opened_by,
                     now,
                     bug.bug_id,
                 ),
             )
             return True
 
+    def reset_running_to_queued(self) -> List[int]:
+        """A restart kills whatever batch was in flight; those bugs must not stay stuck in 'running'."""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute("SELECT bug_id FROM bug_runs WHERE status = 'running'").fetchall()
+            bug_ids = [int(row["bug_id"]) for row in rows]
+            if bug_ids:
+                conn.execute(
+                    "UPDATE bug_runs SET status = 'queued', error = ?, updated_at = ? WHERE status = 'running'",
+                    ("Interrupted by a service restart; queued again.", utc_now()),
+                )
+        return bug_ids
+
     def get_run(self, bug_id: int) -> Optional[RunRecord]:
         with self._lock, self._connect() as conn:
             row = conn.execute("SELECT * FROM bug_runs WHERE bug_id = ?", (bug_id,)).fetchone()
         return _row_to_run(row) if row else None
 
-    def claim_queued_batch(self, leader_bug_id: int) -> List[RunRecord]:
+    def claim_queued_batch(self, leader_bug_id: int, limit: int = 0) -> List[RunRecord]:
         now = utc_now()
         with self._lock, self._connect() as conn:
             leader = conn.execute(
@@ -189,6 +208,8 @@ class StateStore:
                 """,
                 (leader["project_name"], leader["repo_url"], leader["target_branch"]),
             ).fetchall()
+            if limit > 0:
+                rows = _rows_with_leader_first(rows, leader_bug_id, limit)
             bug_ids = [int(row["bug_id"]) for row in rows]
             if not bug_ids:
                 return []
@@ -365,11 +386,7 @@ class StateStore:
             ).fetchone()
         if not row:
             return False
-        return (
-            bool(row["handled_once"])
-            and row["status"] in AUTO_FIXED_STATUSES
-            and bool(row["seen_resolved_once"])
-        )
+        return bool(row["handled_once"]) and row["status"] in AUTO_FIXED_STATUSES
 
     def mark_seen_resolved_once(self, bug_id: int, bug_status: str) -> None:
         with self._lock, self._connect() as conn:
@@ -396,6 +413,48 @@ class StateStore:
                 """,
                 (reason, utc_now(), utc_now(), bug_id),
             )
+
+    def set_triage_targets(self, bug_id: int, targets: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE bug_runs SET triage_targets = ?, updated_at = ? WHERE bug_id = ?",
+                (targets, utc_now(), bug_id),
+            )
+
+    def record_already_handled_in_zentao(self, bug: BugCandidate, project: ProjectConfig) -> bool:
+        """Remember a bug that already carries an AI comment in ZenTao, so later polls skip it cheaply."""
+        now = utc_now()
+        with self._lock, self._connect() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO bug_runs (
+                        bug_id, title, status, project_name, event_action, product_id,
+                        assigned_to, bug_type, bug_status, repo_url, target_branch,
+                        opened_by, handled_once, error, first_seen_at, updated_at, completed_at
+                    )
+                    VALUES (?, ?, 'manual_required', ?, 'poll', ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+                    """,
+                    (
+                        bug.bug_id,
+                        bug.title,
+                        project.name,
+                        bug.product_id,
+                        bug.assigned_to,
+                        bug.bug_type,
+                        bug.status,
+                        project.repo_url,
+                        project.target_branch,
+                        bug.opened_by,
+                        "ZenTao already carries an AI comment for this bug; leaving it to a human.",
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                return False
+            return True
 
     def update_commit(self, bug_id: int, commit_hash: str) -> None:
         with self._lock, self._connect() as conn:
@@ -461,6 +520,17 @@ class StateStore:
             )
 
 
+def _rows_with_leader_first(rows: List[sqlite3.Row], leader_bug_id: int, limit: int) -> List[sqlite3.Row]:
+    """Trim a batch to `limit`, always keeping the leader so its worker never claims an empty batch."""
+    if len(rows) <= limit:
+        return rows
+    trimmed = rows[:limit]
+    if any(int(row["bug_id"]) == leader_bug_id for row in trimmed):
+        return trimmed
+    leader = next(row for row in rows if int(row["bug_id"]) == leader_bug_id)
+    return [leader, *trimmed[: limit - 1]]
+
+
 def _row_to_run(row: sqlite3.Row) -> RunRecord:
     return RunRecord(
         bug_id=int(row["bug_id"]),
@@ -473,4 +543,6 @@ def _row_to_run(row: sqlite3.Row) -> RunRecord:
         commit_hash=row["commit_hash"],
         error=row["error"],
         handled_once=bool(row["handled_once"]),
+        opened_by=row["opened_by"],
+        triage_targets=row["triage_targets"],
     )

@@ -103,6 +103,26 @@ def has_changes(repo: Path) -> bool:
     return bool(output.strip())
 
 
+def head_commit(repo: Path) -> str:
+    return run_git(["rev-parse", "HEAD"], cwd=repo).strip()
+
+
+def changed_files(repo: Path) -> List[str]:
+    output = run_git(["status", "--porcelain"], cwd=repo)
+    return [line[3:].strip() for line in output.splitlines() if line.strip()]
+
+
+def reset_hard_clean(repo: Path, commit: str) -> None:
+    """Throw away everything an interrupted agent attempt left behind."""
+    run_git(["reset", "--hard", commit], cwd=repo)
+    run_git(["clean", "-fd"], cwd=repo)
+
+
+def push_head_dry_run(repo: Path, target_branch: str) -> None:
+    """Fail here rather than half-way through pushing several repositories."""
+    run_git(["push", "--dry-run", "origin", f"HEAD:{target_branch}"], cwd=repo)
+
+
 def commit_all(repo: Path, message: str, author_name: str, author_email: str) -> str:
     env = os.environ.copy()
     env.update(

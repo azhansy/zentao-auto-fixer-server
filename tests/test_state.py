@@ -19,15 +19,20 @@ class StateTests(unittest.TestCase):
             self.assertEqual(run.status, "queued")
             self.assertEqual(run.project_name, "project")
 
-    def test_manual_required_only_after_resolved_seen(self):
+    def test_manual_required_after_one_auto_fix(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = StateStore(Path(tmp) / "state.sqlite3")
-            bug = _bug(1)
-            store.enqueue_first_run(bug, _project())
-            store.update_status(1, "pushed", handled_once=True, completed=True)
+            store.enqueue_first_run(_bug(1), _project())
             self.assertFalse(store.should_mark_manual_required(1))
-            store.mark_seen_resolved_once(1, "resolved")
+            store.update_status(1, "pushed", handled_once=True, completed=True)
             self.assertTrue(store.should_mark_manual_required(1))
+
+    def test_manual_required_not_triggered_by_failed_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            store.enqueue_first_run(_bug(1), _project())
+            store.update_status(1, "failed", handled_once=True, completed=True)
+            self.assertFalse(store.should_mark_manual_required(1))
 
     def test_record_poll_run(self):
         with tempfile.TemporaryDirectory() as tmp:

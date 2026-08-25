@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .agent_runner import SUPPORTED_AGENTS
+
+SUPPORTED_PLATFORMS = ("android", "ios", "mac", "windows", "web")
 from .models import ProjectConfig
 
 
@@ -40,7 +43,9 @@ class Settings:
     poll_interval_seconds: int
     retry_failed: bool
     worker_count: int
+    max_agent_runs_per_day: int
     codex_bin: str
+    claude_bin: str
     codex_attempts: int
     codex_retry_delay_seconds: int
     codex_timeout_seconds: Optional[int]
@@ -67,7 +72,9 @@ class Settings:
             poll_interval_seconds=int(os.getenv("AUTO_FIXER_POLL_INTERVAL_SECONDS", "300")),
             retry_failed=_bool_env("AUTO_FIXER_RETRY_FAILED", False),
             worker_count=max(1, int(os.getenv("AUTO_FIXER_WORKERS", "2"))),
+            max_agent_runs_per_day=max(1, int(os.getenv("AUTO_FIXER_MAX_AGENT_RUNS_PER_DAY", "20"))),
             codex_bin=os.getenv("AUTO_FIXER_CODEX_BIN", "codex"),
+            claude_bin=os.getenv("AUTO_FIXER_CLAUDE_BIN", "claude"),
             codex_attempts=max(1, int(os.getenv("AUTO_FIXER_CODEX_ATTEMPTS", "3"))),
             codex_retry_delay_seconds=max(0, int(os.getenv("AUTO_FIXER_CODEX_RETRY_DELAY_SECONDS", "15"))),
             codex_timeout_seconds=_optional_positive_int_env("AUTO_FIXER_CODEX_TIMEOUT_SECONDS", 1800),
@@ -77,6 +84,9 @@ class Settings:
             git_author_name=os.getenv("GIT_AUTHOR_NAME", "Zentao Auto Fixer"),
             git_author_email=os.getenv("GIT_AUTHOR_EMAIL", "zentao-auto-fixer@example.com"),
         )
+
+    def agent_bin(self, agent: str) -> str:
+        return self.claude_bin if agent == "claude" else self.codex_bin
 
     def validate_for_worker(self) -> Optional[str]:
         missing = []
@@ -103,18 +113,27 @@ def _project_from_json(item: Dict[str, Any], source: Path) -> ProjectConfig:
     if not isinstance(item, dict):
         raise ValueError(f"Invalid project item in {source}: expected object")
     name = str(item.get("name") or "").strip()
-    repo_url = str(item.get("repoUrl") or "").strip()
-    target_branch = str(item.get("targetBranch") or "").strip()
+    app_repo_url, app_target_branch = _repo_entry(item, "app")
+    backend_repo_url, backend_target_branch = _repo_entry(item, "backend")
     product_id = item.get("zentaoProductId")
     missing = []
     if not name:
         missing.append("name")
     if product_id in (None, ""):
         missing.append("zentaoProductId")
-    if not repo_url:
+    if not app_repo_url:
         missing.append("repoUrl")
-    if not target_branch:
+    if not app_target_branch:
         missing.append("targetBranch")
+    if bool(backend_repo_url) != bool(backend_target_branch):
+        missing.append("backend.repoUrl and backend.targetBranch together")
+    skip_platforms = _skip_platforms(item, name, source)
+    agent = str(item.get("agent") or "codex").strip().lower()
+    if agent not in SUPPORTED_AGENTS:
+        raise ValueError(
+            f"Project {name or '?'} in {source} has agent {item.get('agent')!r}; "
+            f"supported agents are {', '.join(SUPPORTED_AGENTS)}"
+        )
     if missing:
         raise ValueError(f"Project config missing {', '.join(missing)} in {source}")
     return ProjectConfig(
@@ -122,10 +141,41 @@ def _project_from_json(item: Dict[str, Any], source: Path) -> ProjectConfig:
         enabled=bool(item.get("enabled", True)),
         zentao_product_id=int(product_id),
         zentao_assigned_to=str(item.get("zentaoAssignedTo") or "").strip(),
-        repo_url=repo_url,
-        target_branch=target_branch,
+        repo_url=app_repo_url,
+        target_branch=app_target_branch,
         only_code_bugs=bool(item.get("onlyCodeBugs", True)),
         max_bugs_per_poll=max(1, int(item.get("maxBugsPerPoll", 1))),
+        backend_repo_url=backend_repo_url,
+        backend_target_branch=backend_target_branch,
+        agent=agent,
+        skip_platforms=skip_platforms,
+    )
+
+
+def _skip_platforms(item: Dict[str, Any], name: str, source: Path) -> tuple:
+    raw = item.get("skipPlatforms") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        raise ValueError(f"Project {name or '?'} in {source}: skipPlatforms must be a list")
+    platforms = tuple(str(entry).strip().lower() for entry in raw if str(entry).strip())
+    unknown = [entry for entry in platforms if entry not in SUPPORTED_PLATFORMS]
+    if unknown:
+        raise ValueError(
+            f"Project {name or '?'} in {source} has skipPlatforms {unknown}; "
+            f"supported values are {', '.join(SUPPORTED_PLATFORMS)}"
+        )
+    return platforms
+
+
+def _repo_entry(item: Dict[str, Any], key: str) -> tuple:
+    """Read a {repoUrl, targetBranch} pair; "app" falls back to the legacy top-level keys."""
+    entry = item.get(key)
+    if not isinstance(entry, dict):
+        entry = item if key == "app" else {}
+    return (
+        str(entry.get("repoUrl") or "").strip(),
+        str(entry.get("targetBranch") or "").strip(),
     )
 
 

@@ -1,8 +1,8 @@
 # Zentao Auto Fixer Server
 
-一个配合 Codex `zentao-bug-fixer` skill 使用的本地自动化服务。服务启动后会定时轮询自部署禅道中的 Bug，把符合条件的代码类 Bug 映射到对应 Git 仓库，调用 Codex 自动修复，并把修复提交推送到配置的目标分支。
+一个配合 `zentao-bug-fixer` skill 使用的本地自动化服务。服务启动后会定时轮询自部署禅道中的 Bug，把状态为「激活」的代码类 Bug 交给 AI 引擎（Codex 或 Claude Code，按项目配置）先分诊再修复，并把修复提交推送到配置的目标分支。
 
-这个项目只负责“调度”：轮询、筛选、去重、同步仓库、启动 Codex、记录状态、提交和推送。真正理解禅道 Bug、修改业务代码、验证、写禅道备注的能力来自已经安装好的 `zentao-bug-fixer` skill。
+这个项目只负责“调度”：轮询、筛选、去重、同步仓库、启动 AI 引擎、记录状态、提交、推送和回写禅道。真正理解禅道 Bug、判断该改哪个仓库、修改业务代码和验证的能力来自 AI 引擎和已经安装好的 `zentao-bug-fixer` skill。
 
 ## 主要解决什么问题
 
@@ -12,7 +12,7 @@
 2. 判断是否是代码问题、是否适合自动修复。
 3. 找到对应 GitLab 项目和目标分支。
 4. 拉取最新代码。
-5. 让 Codex 按禅道上下文修复。
+5. 让 AI 按禅道上下文分诊并修复。
 6. 验证、提交、推送。
 7. 给禅道写原因和解决方案，并在整批 push 成功后统一标记为已解决。
 
@@ -22,7 +22,7 @@
 
 先确认这些条件已经满足：
 
-- 已安装并可使用 Codex CLI。
+- 已安装并可使用 Codex CLI 或 Claude Code CLI（按 `projects.json` 里的 `agent` 选择）。
 - 已安装 `zentao-bug-fixer` skill。
 - `zentao-bug-fixer` skill 里的 `scripts/zentao_client.py` 能读取你的禅道 Bug。
 - 运行服务的机器能访问禅道。
@@ -60,14 +60,14 @@ ZenTao Auto Fixer Server
                 |
                 +-- 同步 Git 仓库目标分支
                 +-- 创建临时 worktree
-                +-- 调用 codex exec + zentao-bug-fixer 一次处理整批 Bug
+                +-- 调用 codex / claude + zentao-bug-fixer 分诊并处理整批 Bug
                 +-- 提交批次修复 commit
                 +-- push 到目标分支
                 +-- 批量标记禅道 Bug 为 resolved/fixed
                 +-- 记录处理状态和事件日志
 ```
 
-同一个项目、同一个 Git 仓库、同一个目标分支中已经入队的 Bug 会合成一个批次处理：同步一次仓库，Codex 一次性修复这一批 Bug，验证通过后生成一个批次 commit 并 push。不同 Git 仓库可以并行处理；同一个 Git 仓库仍然串行，避免多个批次同时改同一条目标分支。
+同一个项目、同一个 Git 仓库、同一个目标分支中已经入队的 Bug 会合成一个批次处理：同步一次仓库（配了后端仓库就同步两个），AI 一次性分诊并修复这一批 Bug，验证通过后每个仓库各生成一个批次 commit 并 push。不同 Git 仓库可以并行处理；同一个 Git 仓库仍然串行，避免多个批次同时改同一条目标分支。
 
 ## 不做什么
 
@@ -81,7 +81,7 @@ ZenTao Auto Fixer Server
 - 不把禅道账号密码、token、GitLab token 写进代码。
 - 不重新实现 `zentao-bug-fixer` 的修复逻辑。
 
-批次处理时，服务会强制 Codex 子进程只写禅道备注，不提前 resolve。只有当整批代码 commit 并 push 成功后，服务才会逐个把这一批 Bug 标记为 `resolved/fixed`。最终关闭 `closed` 通常仍由 QA 或人工确认。
+批次处理时，AI 子进程完全不碰禅道，也不做 git 提交。只有当整批代码 commit 并 push 成功后，服务才会逐个写禅道备注并标记为 `resolved/fixed`。最终关闭 `closed` 通常仍由 QA 或人工确认。
 
 ## 快速启动
 
@@ -117,8 +117,16 @@ ZENTAO_RESOLVED_BUILD=主干
       "enabled": true,
       "zentaoProductId": 8,
       "zentaoAssignedTo": "",
-      "repoUrl": "git@gitlab.example.com:group/product-a.git",
-      "targetBranch": "dev",
+      "agent": "codex",
+      "skipPlatforms": ["android", "mac"],
+      "app": {
+        "repoUrl": "git@gitlab.example.com:group/product-a-app.git",
+        "targetBranch": "dev"
+      },
+      "backend": {
+        "repoUrl": "git@gitlab.example.com:group/product-a-api.git",
+        "targetBranch": "pre-release"
+      },
       "onlyCodeBugs": true,
       "maxBugsPerPoll": 3
     }
@@ -158,9 +166,11 @@ python3 -m zentao_auto_fixer.server
 | `AUTO_FIXER_DATA_DIR` | 本地数据目录，保存 SQLite、仓库缓存、worktree 和日志。 |
 | `AUTO_FIXER_POLL_INTERVAL_SECONDS` | 轮询间隔，单位秒。 |
 | `AUTO_FIXER_WORKERS` | 后台 worker 数量。 |
+| `AUTO_FIXER_MAX_AGENT_RUNS_PER_DAY` | 每天最多调用多少次 AI（一批 Bug 算一次），默认 `20`。到顶后 Bug 留在 `queued`，次日或重启后继续，防止轮询异常连环烧钱。 |
 | `AUTO_FIXER_PROJECTS_FILE` | 多项目映射文件路径。 |
 | `AUTO_FIXER_CODEX_BIN` | Codex CLI 路径，默认 `codex`。 |
-| `AUTO_FIXER_CODEX_TIMEOUT_SECONDS` | Codex 单次执行最长时间，默认 `1800` 秒；设为 `0` 表示不限制。 |
+| `AUTO_FIXER_CLAUDE_BIN` | Claude Code CLI 路径，默认 `claude`；`agent=claude` 的项目会用它。 |
+| `AUTO_FIXER_CODEX_TIMEOUT_SECONDS` | AI 引擎单次执行最长时间，默认 `1800` 秒；设为 `0` 表示不限制。两种引擎共用。 |
 | `AUTO_FIXER_ZENTAO_CLIENT` | `zentao-bug-fixer` skill 的禅道 helper 路径，默认可填 `auto`。 |
 | `AUTO_FIXER_RETRY_FAILED` | 失败任务是否允许下一轮自动重试，默认建议 `0`。 |
 | `ZENTAO_BASE_URL` | 禅道根地址。 |
@@ -181,8 +191,11 @@ python3 -m zentao_auto_fixer.server
 | `enabled` | 是否启用这个项目映射。 |
 | `zentaoProductId` | 禅道产品 ID。 |
 | `zentaoAssignedTo` | 只处理指定指派人；留空表示处理该产品全部符合条件的 Bug。 |
-| `repoUrl` | Git 仓库地址，支持 SSH 或 HTTPS。 |
-| `targetBranch` | 修复后直接提交推送到这个分支。 |
+| `skipPlatforms` | 暂时不处理的端，可填 `android`、`ios`、`mac`、`windows`、`web`。按 Bug 标题里的方括号标记（如 `【android】`）判断，只有标题标注的端**全部**在这个列表里才跳过，不入队也不调 AI。留空表示都处理。 |
+| `agent` | 用哪个 AI 引擎修这个项目，可填 `codex` 或 `claude`，不填默认 `codex`。可执行文件路径分别由 `AUTO_FIXER_CODEX_BIN` 和 `AUTO_FIXER_CLAUDE_BIN` 指定。 |
+| `app.repoUrl` / `app.targetBranch` | App 客户端仓库和目标分支。同一个仓库同时覆盖 Android 和 iOS。 |
+| `backend.repoUrl` / `backend.targetBranch` | 后端仓库和目标分支，可留空。留空时 AI 判定为后端问题的 Bug 会被打回给提 Bug 的人。 |
+| `repoUrl` / `targetBranch`（旧写法） | 顶层写法仍然兼容，等价于 `app`。 |
 | `onlyCodeBugs` | 是否只处理代码类 Bug，建议保持 `true`。 |
 | `maxBugsPerPoll` | 每轮最多入队多少个 Bug。 |
 
@@ -191,12 +204,49 @@ python3 -m zentao_auto_fixer.server
 一个 Bug 需要同时满足：
 
 - 属于启用的 `zentaoProductId`。
-- 当前未解决、未关闭。
+- 禅道状态是「激活」（`active`）。
 - 如果配置了 `zentaoAssignedTo`，指派人必须匹配。
 - 如果 `onlyCodeBugs=true`，Bug 类型必须是代码类问题。
 - 本地 SQLite 里没有处理过这个 Bug。
+- 标题标注的端不在 `skipPlatforms` 里（标题没写端的照常处理）。
+- 禅道备注里没有 AI 处理过的标记（备注尾注含 `zentao-bug-fixer`）。换机器或清空本地数据库后，这条标记仍然能挡住重复修复。
 
-如果一个 Bug 已经自动修复过，后来又被重新激活或再次出现在待修复列表，本服务不会再次自动处理，会标记为 `manual_required`，留给开发人工处理。
+### 分诊、修复和打回
+
+入队后每一批 Bug 交给项目配置的 AI 引擎（`agent`，Codex 或 Claude Code）做一次「先分诊、再修复」：
+
+1. AI 读禅道详情，判断问题出在哪、复现在 Android 还是 iOS、要改 App 还是后端。
+2. 默认从 App 入手；确认是后端问题就改后端；两边都要改就一起改。
+3. 判断不出是什么问题的 Bug 标记为 `rejected`，服务会写一条说明缺哪些信息的禅道备注，并把 Bug **指派回提 Bug 的人**，状态保持激活，本地记为 `rejected_to_reporter`。
+
+**一条 Bug 只能描述一个端**：标题里同时标了多个端（例如 `【mac】【ios】`）的 Bug 不会被修，服务直接写备注请测试按端拆成多条，并指派回提 Bug 的人。这一步在调用 AI 之前完成，不消耗 AI 额度。
+
+禅道备注固定以「AI 理解的问题」和「复现步骤」开头，再写原因和解决方案，方便测试同事一眼核对 AI 理解的和自己报的是不是同一个问题：
+
+```text
+问题原因：
+【AI 理解的问题】
+iOS 端群聊消息重复响铃
+
+【复现步骤】
+1. 打开会话窗口
+2. 两台设备登录同一账号
+3. 安卓端已读后 iOS 再次响铃
+
+【原因分析】
+推送回调没有按会话去重
+
+解决方案：
+在推送回调里按 sessionId 去重
+改动仓库：app
+复现端：ios
+提交：app:abc1234
+```
+4. AI 不做 git 提交、不写禅道；提交、推送、备注、解决、指派全部由服务在 AI 跑完之后执行。App 和后端各自提交推送到各自的目标分支。
+
+### 只修一次
+
+如果一个 Bug 已经自动修复过，后来测试验收不通过又变回激活状态，本服务不会再次自动处理，会标记为 `manual_required`，留给开发人工处理。
 
 ## 查看状态
 
@@ -230,10 +280,11 @@ curl http://127.0.0.1:8787/runs/<bug_id>/events
 curl http://127.0.0.1:8787/polls
 ```
 
-查看 Codex 输出：
+查看 AI 引擎输出：
 
 ```bash
-tail -f .auto-fixer/logs/bug-<bug_id>-codex.log
+tail -f .auto-fixer/logs/batch-<first>-<last>-agent.log
+cat .auto-fixer/logs/batch-<first>-<last>-triage.json   # AI 的分诊结论
 ```
 
 常见任务状态：
@@ -243,12 +294,13 @@ tail -f .auto-fixer/logs/bug-<bug_id>-codex.log
 | `queued` | 已入队，等待 worker 处理。 |
 | `running` | 正在同步仓库或修复。 |
 | `pushed` | 已提交并推送到目标分支。 |
-| `no_changes` | Codex 结束但没有产生代码变更。 |
+| `no_changes` | AI 结束但没有产生代码变更。 |
 | `sync_conflict` | push 时远端分支已有新提交，服务不会强推。 |
-| `manual_required` | 需要人工处理，例如自动修复后又被激活。 |
-| `failed` | 处理失败，查看 `error` 和 codex log。 |
+| `rejected_to_reporter` | AI 分诊判断不出问题，已打回并指派回提 Bug 的人。 |
+| `manual_required` | 需要人工处理，例如自动修复后又被激活，或禅道备注里已有 AI 处理记录。 |
+| `failed` | 处理失败，查看 `error` 和 agent log。 |
 
-如果某个 Bug 的 `events` 长时间停在 `codex_attempt`，同时 Codex 日志没有继续更新，通常表示 `codex exec` 卡住了。可以通过 `AUTO_FIXER_CODEX_TIMEOUT_SECONDS` 设置单次最长执行时间。超时后服务会终止当前 Codex 进程及其子进程，释放同仓库队列；如果 `AUTO_FIXER_CODEX_ATTEMPTS` 大于 1，会在同一个批次 worktree 内继续下一次尝试。
+如果某个 Bug 的 `events` 长时间停在 `agent_attempt`，同时 AI 日志没有继续更新，通常表示引擎进程卡住了。可以通过 `AUTO_FIXER_CODEX_TIMEOUT_SECONDS` 设置单次最长执行时间。超时后服务会终止当前 AI 进程及其子进程，释放同仓库队列；如果 `AUTO_FIXER_CODEX_ATTEMPTS` 大于 1，会在同一个批次 worktree 内继续下一次尝试。
 
 ## 本地数据
 
@@ -259,7 +311,7 @@ tail -f .auto-fixer/logs/bug-<bug_id>-codex.log
   state.sqlite3          # 任务状态和轮询记录
   repos/                 # Git 仓库缓存
   worktrees/             # 临时 worktree
-  logs/                  # Codex 执行日志
+  logs/                  # AI 引擎执行日志和分诊结论
 ```
 
 如果要重新测试，可以先停止服务，再备份或删除 `state.sqlite3`。删除状态库会让服务忘记哪些 Bug 已经处理过，生产环境不要随意删除。
@@ -287,7 +339,7 @@ ZENTAO_RESOLVE_BUG_AFTER_COMMENT=0
 ZENTAO_RESOLVED_BUILD=主干
 ```
 
-批次模式下，Codex 子进程会被强制只写备注，不提前 resolve；外层服务在 commit 和 push 成功后调用 `zentao-bug-fixer` skill 的 resolve 能力，把这一批 Bug 标记为 `resolved/fixed`。它不会执行最终关闭。
+批次模式下，AI 子进程完全不碰禅道；外层服务在 commit 和 push 成功后调用 `zentao-bug-fixer` skill 写备注并把这一批 Bug 标记为 `resolved/fixed`，分诊失败的 Bug 则写备注并指派回提 Bug 的人。它不会执行最终关闭。
 
 ## 本机、内网和不同局域网
 
@@ -317,7 +369,7 @@ PYTHONPYCACHEPREFIX=.pycache-compile python3 -m compileall zentao_auto_fixer tes
 - 不提交 `.auto-fixer`。
 - 不提交禅道账号、密码、token、cookie。
 - 不提交私有 GitLab / 禅道域名，示例统一使用 `example.com`。
-- 不提交包含真实 Bug 内容的 Codex 日志。
+- 不提交包含真实 Bug 内容的 AI 引擎日志。
 
 建议 `.gitignore` 至少包含：
 

@@ -5,16 +5,24 @@
       "enabled": true,
       "zentaoProductId": 8,
       "zentaoAssignedTo": "",
-      "repoUrl": "git@github.com:group/product-a.git",
-      "targetBranch": "dev",
+      "agent": "codex",
+      "app": {
+        "repoUrl": "git@github.com:group/product-a-app.git",
+        "targetBranch": "dev"
+      },
+      "backend": {
+        "repoUrl": "git@github.com:group/product-a-api.git",
+        "targetBranch": "dev"
+      },
       "onlyCodeBugs": true,
       "maxBugsPerPoll": 3
     },
     {
-      "name": "Example Product B",
+      "name": "Example Product B (legacy single-repo form)",
       "enabled": true,
       "zentaoProductId": 12,
       "zentaoAssignedTo": "",
+      "agent": "claude",
       "repoUrl": "git@github.com:group/product-b.git",
       "targetBranch": "main",
       "onlyCodeBugs": true,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import signal
 import threading
 from http import HTTPStatus
@@ -30,8 +31,24 @@ class App:
 
     def start(self) -> None:
         self.settings.data_dir.mkdir(parents=True, exist_ok=True)
+        self._recover_from_previous_run()
         self.worker.start()
         self.poller.start()
+
+    def _recover_from_previous_run(self) -> None:
+        """A restart kills any batch in flight; requeue those bugs and drop their leftover checkouts."""
+        requeued = self.state.reset_running_to_queued()
+        if requeued:
+            self.state.record_run_events(requeued, "requeued_after_restart", "Service restarted mid-batch")
+            LOGGER.info("重新排队上次中断的 %s 个 Bug：%s", len(requeued), requeued)
+        worktree_dir = self.settings.worktree_dir
+        if not worktree_dir.is_dir():
+            return
+        for leftover in worktree_dir.iterdir():
+            if not leftover.is_dir():
+                continue
+            shutil.rmtree(leftover, ignore_errors=True)
+            LOGGER.info("清理上次残留的工作区 %s", leftover)
 
     def stop(self) -> None:
         with self._stop_lock:
