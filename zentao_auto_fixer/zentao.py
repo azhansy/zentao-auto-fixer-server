@@ -22,6 +22,13 @@ class ZenTaoWriteError(RuntimeError):
     pass
 
 
+def bug_view_url(bug_id: int) -> str:
+    base_url = os.getenv("ZENTAO_BASE_URL", "").rstrip("/")
+    if not base_url:
+        return ""
+    return f"{base_url}/bug-view-{bug_id}.html"
+
+
 def list_project_bugs(client_script: Path, project: ProjectConfig) -> List[BugCandidate]:
     try:
         return _list_project_bugs_with_helper(client_script, project)

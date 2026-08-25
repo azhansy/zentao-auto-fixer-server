@@ -6,6 +6,7 @@
       "zentaoProductId": 8,
       "zentaoAssignedTo": "",
       "agent": "codex",
+      "skipPlatforms": ["android", "mac"],
       "app": {
         "repoUrl": "git@github.com:group/product-a-app.git",
         "targetBranch": "dev"

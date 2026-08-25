@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .models import AUTO_FIXED_STATUSES, BugCandidate, ProjectConfig, RunRecord
+from .zentao import bug_view_url
 
 
 def utc_now() -> str:
@@ -233,7 +234,7 @@ class StateStore:
                 "SELECT * FROM bug_runs ORDER BY updated_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [{**dict(row), "url": bug_view_url(row["bug_id"])} for row in rows]
 
     def run_summary_since(self, since: str) -> Dict[str, int]:
         with self._lock, self._connect() as conn:

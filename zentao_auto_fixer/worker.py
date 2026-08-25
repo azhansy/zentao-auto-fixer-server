@@ -34,6 +34,7 @@ from .zentao import (
     ZenTaoWriteError,
     assign_bug,
     bug_is_still_actionable,
+    bug_view_url,
     comment_bug,
     resolve_bug,
 )
@@ -526,7 +527,8 @@ class Worker:
 
         commit_summary = " ".join(commits)
         self._comment_and_resolve(fixed, verdicts, commit_summary)
-        LOGGER.info("Worker pushed batch %s commits=%s", batch_label, commit_summary)
+        urls = ", ".join(bug_view_url(run.bug_id) for run in fixed)
+        LOGGER.info("Worker pushed batch %s commits=%s urls=%s", batch_label, commit_summary, urls)
 
     def _comment_and_resolve(
         self,

@@ -14,6 +14,7 @@ from .config import Settings
 from .poller import Poller
 from .state import StateStore, utc_now
 from .worker import Worker
+from .zentao import bug_view_url
 
 
 LOGGER = logging.getLogger("zentao_auto_fixer")
@@ -103,7 +104,7 @@ def make_handler(app: App):
                 if not run:
                     self._json(HTTPStatus.NOT_FOUND, {"error": "run not found"})
                     return
-                self._json(HTTPStatus.OK, {"run": run.__dict__})
+                self._json(HTTPStatus.OK, {"run": {**run.__dict__, "url": bug_view_url(run.bug_id)}})
                 return
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
