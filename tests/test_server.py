@@ -48,6 +48,8 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("禅道自动修复看板".encode(), body)
         self.assertIn(b"/runs?limit=500", body)
         self.assertIn(b"window.location.assign(detail.url)", body)
+        self.assertIn(b"const pageSize = 50", body)
+        self.assertIn(b"sortPriority(left) - sortPriority(right)", body)
 
     def test_runs_honors_bounded_limit(self):
         seen = []

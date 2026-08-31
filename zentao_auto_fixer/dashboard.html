@@ -61,6 +61,9 @@
     .timeline p { margin: 3px 0 0; color: #cbd5e1; overflow-wrap: anywhere; }
     .polls { margin-top: 16px; }
     .empty { padding: 28px 16px; text-align: center; color: var(--muted); }
+    .pagination { padding: 10px 16px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; align-items: center; gap: 10px; }
+    .pagination button { color: var(--text); background: #0f172a; border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; cursor: pointer; }
+    .pagination button:disabled { opacity: .45; cursor: default; }
     @media (max-width: 980px) {
       .stats { grid-template-columns: repeat(3, 1fr); }
       .layout { grid-template-columns: 1fr; }
@@ -113,6 +116,11 @@
         </table>
         <div id="runs-empty" class="empty" hidden>没有符合条件的任务</div>
       </div>
+      <div class="pagination">
+        <button id="previous-page" type="button">上一页</button>
+        <span id="page-state" class="muted">第 1 / 1 页</span>
+        <button id="next-page" type="button">下一页</button>
+      </div>
     </section>
 
     <aside class="panel">
@@ -146,6 +154,8 @@
   let runs = [];
   let selectedBug = null;
   let refreshing = false;
+  let page = 1;
+  const pageSize = 50;
 
   const byId = id => document.getElementById(id);
   const textNode = (tag, text, className = "") => {
@@ -161,6 +171,7 @@
   const localTime = value => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "-";
   const statusTime = run => queuedStatuses.has(run.status) || run.status === "running"
     ? run.updated_at : run.completed_at || run.updated_at;
+  const sortPriority = run => run.status === "running" ? 0 : queuedStatuses.has(run.status) ? 1 : 2;
 
   function renderSummary() {
     const counts = { all: runs.length, success: 0, failure: 0, running: 0, queued: 0, other: 0 };
@@ -172,8 +183,13 @@
     const body = byId("runs");
     body.replaceChildren();
     const filter = byId("filter").value;
-    const visible = runs.filter(run => filter === "all" || category(run.status) === filter);
-    visible.forEach(run => {
+    const filtered = runs
+      .filter(run => filter === "all" || category(run.status) === filter)
+      .sort((left, right) => sortPriority(left) - sortPriority(right)
+        || (Date.parse(statusTime(right)) || 0) - (Date.parse(statusTime(left)) || 0));
+    const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+    page = Math.min(page, pageCount);
+    filtered.slice((page - 1) * pageSize, page * pageSize).forEach(run => {
       const row = document.createElement("tr");
       row.dataset.bugId = run.bug_id;
       if (run.bug_id === selectedBug) row.className = "selected";
@@ -199,7 +215,10 @@
       row.addEventListener("click", () => showRun(run));
       body.append(row);
     });
-    byId("runs-empty").hidden = visible.length !== 0;
+    byId("runs-empty").hidden = filtered.length !== 0;
+    byId("page-state").textContent = `第 ${page} / ${pageCount} 页 · 每页 ${pageSize} 条`;
+    byId("previous-page").disabled = page <= 1;
+    byId("next-page").disabled = page >= pageCount;
   }
 
   async function showRun(run) {
@@ -279,7 +298,9 @@
     }
   }
 
-  byId("filter").addEventListener("change", renderRuns);
+  byId("filter").addEventListener("change", () => { page = 1; renderRuns(); });
+  byId("previous-page").addEventListener("click", () => { page--; renderRuns(); });
+  byId("next-page").addEventListener("click", () => { page++; renderRuns(); });
   refresh();
   setInterval(refresh, 5000);
 </script>
