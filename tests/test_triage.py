@@ -1,6 +1,8 @@
 import json
+import threading
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -13,6 +15,7 @@ from zentao_auto_fixer.agent_runner import (
     _descendant_process_groups,
     build_agent_command,
     read_triage_result,
+    stop_active_agents,
 )
 from zentao_auto_fixer.worker import _cause_text
 from zentao_auto_fixer.zentao import _candidate_from_bug, bug_has_ai_comment
@@ -148,6 +151,25 @@ class AgentCommandTests(unittest.TestCase):
         with mock.patch("zentao_auto_fixer.agent_runner.subprocess.run", return_value=process_list):
             self.assertEqual(_descendant_process_groups(100), [200, 201, 100])
 
+    def test_service_stop_terminates_every_active_agent_group(self):
+        import zentao_auto_fixer.agent_runner as runner
+
+        process = mock.Mock(pid=100)
+        process.poll.return_value = None
+        with runner._ACTIVE_PROCESSES_LOCK:
+            runner._ACTIVE_PROCESSES[100] = process
+        try:
+            with mock.patch.object(runner, "_descendant_process_groups", return_value=[200, 100]), mock.patch.object(
+                runner, "_terminate_process_groups"
+            ) as terminate:
+                stop_active_agents()
+        finally:
+            with runner._ACTIVE_PROCESSES_LOCK:
+                runner._ACTIVE_PROCESSES.clear()
+
+        terminate.assert_called_once_with(process, [200, 100])
+        process.wait.assert_called_once_with(timeout=3)
+
     def test_codex_runs_in_the_app_worktree(self):
         cmd = build_agent_command("codex", "codex", Path("/wt/app"), [Path("/wt/api")], "P")
         self.assertEqual(cmd[:4], ["codex", "exec", "--cd", "/wt/app"])
@@ -176,6 +198,39 @@ class AgentCommandTests(unittest.TestCase):
 
 
 class CallSiteTests(unittest.TestCase):
+    def test_same_repo_agents_can_run_in_parallel_worktrees(self):
+        from types import SimpleNamespace
+
+        from zentao_auto_fixer.worker import Worker
+
+        runs = {
+            bug_id: SimpleNamespace(
+                bug_id=bug_id,
+                title=f"bug {bug_id}",
+                status="queued",
+                repo_url="same-repo",
+                event_action="poll",
+                project_name="p",
+            )
+            for bug_id in (1, 2)
+        }
+        state = mock.Mock()
+        state.get_run.side_effect = lambda bug_id: runs[bug_id]
+        settings = SimpleNamespace(worker_count=2, validate_for_worker=lambda: "")
+        worker = Worker(settings, state)
+        worker._project_for = mock.Mock(
+            return_value=SimpleNamespace(process_ui_bugs=True, has_backend_repo=False)
+        )
+        worker._stale_reason = mock.Mock(return_value="")
+        worker._claim_agent_budget = mock.Mock(return_value=True)
+        barrier = threading.Barrier(2)
+        worker._process_batch = mock.Mock(side_effect=lambda _bug_id, _project: barrier.wait(timeout=2))
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(worker._process_bug, (1, 2)))
+
+        self.assertEqual(worker._process_batch.call_count, 2)
+
     def test_rebase_conflict_keeps_resolving_until_remote_is_current(self):
         from types import SimpleNamespace
 
@@ -330,9 +385,43 @@ class CallSiteTests(unittest.TestCase):
             has_backend_repo=False,
         )
 
-        worker._process_batch_with_repo_lock(1, project)
+        worker._process_batch(1, project)
 
         worker._fail_batch.assert_called_once_with([run], "failed", "boom", "", count_no_progress=True)
+
+    def test_service_stop_leaves_running_batch_for_restart_recovery(self):
+        from types import SimpleNamespace
+
+        from zentao_auto_fixer.worker import Worker
+
+        run = SimpleNamespace(
+            bug_id=1,
+            title="bug",
+            project_name="p",
+            target_branch="dev",
+            repo_url="repo",
+        )
+        state = mock.Mock()
+        state.claim_queued_batch.return_value = [run]
+        state.get_run.return_value = SimpleNamespace(status="running")
+        worker = Worker(SimpleNamespace(worker_count=1), state)
+        worker._prepare_checkout = mock.Mock(side_effect=RuntimeError("service stopped"))
+        worker._fail_batch = mock.Mock()
+        worker._stop.set()
+        project = SimpleNamespace(
+            max_bugs_per_poll=1,
+            process_ui_bugs=False,
+            has_backend_repo=False,
+        )
+
+        worker._process_batch(1, project)
+
+        worker._fail_batch.assert_not_called()
+        state.record_run_events.assert_any_call(
+            [1],
+            "interrupted_for_restart",
+            "Service stopped; the next start will requeue this batch.",
+        )
 
     def test_worker_calls_the_runner_with_a_valid_argument_list(self):
         """autospec rejects a call that no longer matches the runner's signature, which unit tests

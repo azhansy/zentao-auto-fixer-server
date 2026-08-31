@@ -141,7 +141,7 @@ class MultiPlatformHandBackTests(unittest.TestCase):
         worker = Worker(settings, state)
         worker._stale_reason = lambda bug_id: ""
         worker._record_unable_to_fix = mock.Mock()
-        worker._process_batch_with_repo_lock = mock.Mock()
+        worker._process_batch = mock.Mock()
 
         worker._process_bug(1)
 
@@ -177,7 +177,7 @@ class MultiPlatformHandBackTests(unittest.TestCase):
         worker = Worker(settings, state)
         worker._stale_reason = lambda bug_id: ""
         worker._record_unable_to_fix = mock.Mock()
-        worker._process_batch_with_repo_lock = mock.Mock()
+        worker._process_batch = mock.Mock()
 
         worker._process_bug(1)
 

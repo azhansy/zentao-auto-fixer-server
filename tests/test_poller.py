@@ -210,7 +210,7 @@ class AgentBudgetTests(unittest.TestCase):
     def test_three_consecutive_no_progress_runs_trip_the_daily_fuse(self):
         worker = _worker(max_runs=50, temp_dirs=self._temp_dirs)
         day = datetime.now().astimezone().date().isoformat()
-        worker.state.set_daily_counter("consecutive_no_progress", day, 3)
+        worker.state.set_daily_counter(worker._no_progress_counter_name(), day, 3)
 
         self.assertFalse(worker._claim_agent_budget())
         self.assertEqual(worker.agent_runs_today(), 0)

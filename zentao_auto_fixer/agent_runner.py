@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 SUPPORTED_AGENTS = ("codex", "claude")
+_ACTIVE_PROCESSES: Dict[int, subprocess.Popen] = {}
+_ACTIVE_PROCESSES_LOCK = threading.Lock()
 
 
 class AgentError(RuntimeError):
@@ -262,33 +264,39 @@ def _run_agent(
         bufsize=1,
         start_new_session=True,
     )
-    assert process.stdout is not None
-    with (log_path.open("a", encoding="utf-8") if log_path else _NullWriter()) as log_file:
-        log_file.write("$ " + " ".join(part for part in cmd if part != prompt) + " <prompt>\n")
-        reader = threading.Thread(
-            target=_stream_output,
-            args=(process.stdout, log_file, output_tail),
-            name=f"agent-output-{log_label}",
-            daemon=True,
-        )
-        reader.start()
-        timed_out = False
-        try:
-            return_code = process.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            log_file.write(f"\n[agent_runner] {agent} timed out after {timeout_seconds}s; terminating process group.\n")
-            log_file.flush()
-            process_groups = _descendant_process_groups(process.pid)
-            _terminate_process_groups(process, process_groups)
+    with _ACTIVE_PROCESSES_LOCK:
+        _ACTIVE_PROCESSES[process.pid] = process
+    try:
+        assert process.stdout is not None
+        with (log_path.open("a", encoding="utf-8") if log_path else _NullWriter()) as log_file:
+            log_file.write("$ " + " ".join(part for part in cmd if part != prompt) + " <prompt>\n")
+            reader = threading.Thread(
+                target=_stream_output,
+                args=(process.stdout, log_file, output_tail),
+                name=f"agent-output-{log_label}",
+                daemon=True,
+            )
+            reader.start()
+            timed_out = False
             try:
-                return_code = process.wait(timeout=10)
+                return_code = process.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
-                log_file.write(f"[agent_runner] {agent} did not exit after SIGTERM; killing process group.\n")
+                timed_out = True
+                log_file.write(f"\n[agent_runner] {agent} timed out after {timeout_seconds}s; terminating process group.\n")
                 log_file.flush()
-                _kill_process_groups(process, process_groups)
-                return_code = process.wait(timeout=10)
-        reader.join(timeout=10)
+                process_groups = _descendant_process_groups(process.pid)
+                _terminate_process_groups(process, process_groups)
+                try:
+                    return_code = process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    log_file.write(f"[agent_runner] {agent} did not exit after SIGTERM; killing process group.\n")
+                    log_file.flush()
+                    _kill_process_groups(process, process_groups)
+                    return_code = process.wait(timeout=10)
+            reader.join(timeout=10)
+    finally:
+        with _ACTIVE_PROCESSES_LOCK:
+            _ACTIVE_PROCESSES.pop(process.pid, None)
     output = "".join(output_tail)
     if timed_out:
         raise AgentError(f"{agent} timed out after {timeout_seconds}s:\n{output}")
@@ -299,6 +307,21 @@ def _run_agent(
     if _agent_quota_exhausted(agent, output):
         raise AgentQuotaError(f"{agent} quota exhausted:\n{output}")
     return output
+
+
+def stop_active_agents() -> None:
+    """A service restart must not leave detached coding agents running without a parent."""
+    with _ACTIVE_PROCESSES_LOCK:
+        active = list(_ACTIVE_PROCESSES.values())
+    for process in active:
+        if process.poll() is not None:
+            continue
+        process_groups = _descendant_process_groups(process.pid)
+        _terminate_process_groups(process, process_groups)
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            _kill_process_groups(process, process_groups)
 
 
 def _agent_env(env_overrides: Optional[Dict[str, str]]) -> Dict[str, str]:

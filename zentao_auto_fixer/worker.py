@@ -10,7 +10,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .agent_runner import AgentError, AgentQuotaError, TriageResultError, run_agent_batch_fix
+from .agent_runner import (
+    AgentError,
+    AgentQuotaError,
+    TriageResultError,
+    run_agent_batch_fix,
+    stop_active_agents,
+)
 from .config import Settings
 from .git_ops import (
     GitError,
@@ -74,6 +80,7 @@ class Worker:
 
     def stop(self) -> None:
         self._stop.set()
+        stop_active_agents()
         for _thread in self._threads:
             self.queue.put(-1)
         for thread in self._threads:
@@ -151,27 +158,19 @@ class Worker:
             self._reject_multi_platform(run, titled_platforms)
             return
 
-        repo_urls = [run.repo_url]
-        if project.has_backend_repo:
-            repo_urls.append(project.backend_repo_url)
-        self.state.record_run_event(bug_id, "waiting_repo_lock", " ".join(repo_urls))
-        with contextlib.ExitStack() as stack:
-            # Sorted so two workers touching the same pair of repos cannot deadlock on each other.
-            for repo_url in sorted(set(repo_urls)):
-                stack.enter_context(self._lock_for_repo(repo_url))
-            latest = self.state.get_run(bug_id)
-            if not latest or latest.status != "queued":
-                return
-            if not self._claim_agent_budget():
-                reason = self._agent_budget_block_reason()
-                self.state.record_run_event(
-                    bug_id,
-                    "agent_budget_exhausted",
-                    reason,
-                )
-                LOGGER.warning("Bug #%s stays queued: %s", bug_id, reason)
-                return
-            self._process_batch_with_repo_lock(bug_id, project)
+        latest = self.state.get_run(bug_id)
+        if not latest or latest.status != "queued":
+            return
+        if not self._claim_agent_budget():
+            reason = self._agent_budget_block_reason()
+            self.state.record_run_event(
+                bug_id,
+                "agent_budget_exhausted",
+                reason,
+            )
+            LOGGER.warning("Bug #%s stays queued: %s", bug_id, reason)
+            return
+        self._process_batch(bug_id, project)
 
     def _reject_multi_platform(self, run: RunRecord, platforms: tuple) -> None:
         """One bug must describe one platform; a multi-platform title cannot be pinned to code."""
@@ -204,7 +203,7 @@ class Worker:
     def _claim_agent_budget(self) -> bool:
         """One batch costs one agent run. The ceiling is the backstop against a runaway poll loop."""
         today = datetime.now().astimezone().date().isoformat()
-        if self.state.daily_counter_value("consecutive_no_progress", today) >= 3:
+        if self.state.daily_counter_value(self._no_progress_counter_name(), today) >= 3:
             return False
         return self._claim_agent_run(today)
 
@@ -224,17 +223,20 @@ class Worker:
 
     def _agent_budget_block_reason(self) -> str:
         today = datetime.now().astimezone().date().isoformat()
-        if self.state.daily_counter_value("consecutive_no_progress", today) >= 3:
+        if self.state.daily_counter_value(self._no_progress_counter_name(), today) >= 3:
             return "Three consecutive AI runs produced no pushed fix; paused until tomorrow."
         return f"Hit the persisted {self.settings.max_agent_runs_per_day} agent runs/day ceiling; paused until tomorrow."
 
     def _record_no_progress(self) -> None:
         today = datetime.now().astimezone().date().isoformat()
-        self.state.increment_daily_counter("consecutive_no_progress", today)
+        self.state.increment_daily_counter(self._no_progress_counter_name(), today)
 
     def _record_progress(self) -> None:
         today = datetime.now().astimezone().date().isoformat()
-        self.state.set_daily_counter("consecutive_no_progress", today, 0)
+        self.state.set_daily_counter(self._no_progress_counter_name(), today, 0)
+
+    def _no_progress_counter_name(self) -> str:
+        return f"consecutive_no_progress:{threading.current_thread().name}"
 
     def agent_runs_today(self) -> int:
         today = datetime.now().astimezone().date().isoformat()
@@ -252,7 +254,7 @@ class Worker:
                 return project
         return None
 
-    def _process_batch_with_repo_lock(self, leader_bug_id: int, project: ProjectConfig) -> None:
+    def _process_batch(self, leader_bug_id: int, project: ProjectConfig) -> None:
         batch = self.state.claim_queued_batch(leader_bug_id, limit=project.max_bugs_per_poll)
         if not batch:
             return
@@ -335,22 +337,34 @@ class Worker:
                 self._record_no_progress()
                 LOGGER.info("Worker finished batch %s with nothing to commit", batch_label)
                 return
-            self._commit_push_and_resolve(
-                fixed,
-                checkouts,
-                verdicts,
-                batch_label,
-                project.agent,
-                project.allow_full_xcodebuild,
-            )
+            with contextlib.ExitStack() as stack:
+                for repo_url in sorted({checkout.repo_url for checkout in checkouts.values()}):
+                    stack.enter_context(self._lock_for_repo(repo_url))
+                self._commit_push_and_resolve(
+                    fixed,
+                    checkouts,
+                    verdicts,
+                    batch_label,
+                    project.agent,
+                    project.allow_full_xcodebuild,
+                )
         except Exception as exc:
             unfinished = [run for run in batch if _still_running(self.state, run.bug_id)]
-            self._fail_batch(unfinished, "failed", str(exc), "", count_no_progress=True)
-            LOGGER.exception("Worker failed batch %s", batch_label)
+            if self._stop.is_set():
+                self.state.record_run_events(
+                    [run.bug_id for run in unfinished],
+                    "interrupted_for_restart",
+                    "Service stopped; the next start will requeue this batch.",
+                )
+                LOGGER.info("Worker interrupted batch %s for service stop", batch_label)
+            else:
+                self._fail_batch(unfinished, "failed", str(exc), "", count_no_progress=True)
+                LOGGER.exception("Worker failed batch %s", batch_label)
         finally:
             for checkout in checkouts.values():
                 try:
-                    remove_worktree(checkout.repo_cache, checkout.worktree)
+                    with self._lock_for_repo(checkout.repo_url):
+                        remove_worktree(checkout.repo_cache, checkout.worktree)
                 except Exception:
                     LOGGER.exception("Could not remove worktree %s", checkout.worktree)
             if checkouts:
@@ -374,23 +388,25 @@ class Worker:
         repo_cache = self.settings.repo_cache_dir / repo_cache_name(repo_url)
         LOGGER.info("Batch %s syncing %s repo %s", batch_label, kind, repo_url)
         self.state.record_run_events(bug_ids, f"sync_repo_{kind}", repo_url)
-        sync_result = ensure_repo_cache(
-            repo_url,
-            repo_cache,
-            target_branch,
-            timeout=self.settings.git_timeout_seconds,
-            shallow=self.settings.git_shallow_clone,
-        )
-        self.state.record_run_events(bug_ids, f"repo_{kind}_{sync_result.action}", str(sync_result.path))
-        worktree = create_detached_worktree(
-            repo_cache,
-            self.settings.worktree_dir,
-            f"{kind}-zentao-batch-{bug_ids[0]}-{bug_ids[-1]}",
-            target_branch,
-        )
+        with self._lock_for_repo(repo_url):
+            sync_result = ensure_repo_cache(
+                repo_url,
+                repo_cache,
+                target_branch,
+                timeout=self.settings.git_timeout_seconds,
+                shallow=self.settings.git_shallow_clone,
+            )
+            self.state.record_run_events(bug_ids, f"repo_{kind}_{sync_result.action}", str(sync_result.path))
+            worktree = create_detached_worktree(
+                repo_cache,
+                self.settings.worktree_dir,
+                f"{kind}-zentao-batch-{bug_ids[0]}-{bug_ids[-1]}",
+                target_branch,
+            )
         self.state.record_run_events(bug_ids, f"create_worktree_{kind}", str(worktree))
         return _Checkout(
             kind=kind,
+            repo_url=repo_url,
             repo_cache=repo_cache,
             worktree=worktree,
             target_branch=target_branch,
@@ -887,8 +903,9 @@ class Worker:
 
 
 class _Checkout:
-    def __init__(self, kind: str, repo_cache: Path, worktree: Path, target_branch: str, baseline: str):
+    def __init__(self, kind: str, repo_url: str, repo_cache: Path, worktree: Path, target_branch: str, baseline: str):
         self.kind = kind
+        self.repo_url = repo_url
         self.repo_cache = repo_cache
         self.worktree = worktree
         self.target_branch = target_branch
