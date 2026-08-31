@@ -128,6 +128,18 @@ class AgentCommandTests(unittest.TestCase):
         )
         self.assertIn("可以按需运行完整 xcodebuild 构建", prompt)
 
+    def test_conflict_prompt_requires_preserving_both_sides_and_retesting(self):
+        prompt = _batch_prompt(
+            [(1, "bug")],
+            Path("/tmp/zentao.py"),
+            Path("/wt/app"),
+            None,
+            Path("/tmp/result.json"),
+            conflict_context="app 仓库 /wt/app",
+        )
+        self.assertIn("同时保留远端的新改动和本次 Bug 修复意图", prompt)
+        self.assertIn("解决后重新运行与改动直接相关的测试", prompt)
+
     def test_timeout_cleanup_includes_detached_descendant_process_groups(self):
         process_list = mock.Mock(
             returncode=0,
@@ -164,6 +176,62 @@ class AgentCommandTests(unittest.TestCase):
 
 
 class CallSiteTests(unittest.TestCase):
+    def test_rebase_conflict_runs_one_budgeted_agent_resolution(self):
+        from types import SimpleNamespace
+
+        from zentao_auto_fixer.git_ops import RebaseConflictError
+        from zentao_auto_fixer.worker import Worker
+
+        settings = SimpleNamespace(
+            worker_count=1,
+            git_timeout_seconds=30,
+            git_shallow_clone=True,
+            logs_dir=Path("/logs"),
+            codex_timeout_seconds=60,
+            zentao_client_script=Path("/tmp/zentao.py"),
+            agent_bin=lambda agent: agent,
+        )
+        state = mock.Mock()
+        worker = Worker(settings, state)
+        worker._claim_agent_budget = mock.Mock(return_value=True)
+        checkout = SimpleNamespace(
+            kind="app",
+            worktree=Path("/wt/app"),
+            target_branch="dev",
+            baseline="old",
+        )
+        run = SimpleNamespace(bug_id=1, title="bug")
+        verdicts = {1: {"decision": "fixed", "solution": "old"}}
+        resolved = {1: {"decision": "fixed", "solution": "merged", "targets": ["app"]}}
+
+        with mock.patch(
+            "zentao_auto_fixer.worker.rebase_onto_latest_remote",
+            side_effect=RebaseConflictError("conflict", "latest"),
+        ), mock.patch(
+            "zentao_auto_fixer.worker.run_agent_batch_fix", return_value=resolved
+        ) as agent, mock.patch(
+            "zentao_auto_fixer.worker.continue_rebase"
+        ) as continue_rebase, mock.patch(
+            "zentao_auto_fixer.worker.head_commit", return_value="merged-head"
+        ):
+            self.assertTrue(
+                worker._rebase_changed_checkouts(
+                    [run],
+                    [checkout],
+                    {"app": checkout},
+                    verdicts,
+                    "#1",
+                    "claude",
+                    False,
+                )
+            )
+
+        worker._claim_agent_budget.assert_called_once()
+        self.assertIn("conflict_context", agent.call_args.kwargs)
+        continue_rebase.assert_called_once_with(checkout.worktree, timeout=30)
+        self.assertEqual(checkout.baseline, "latest")
+        self.assertEqual(verdicts[1]["solution"], "merged")
+
     def test_writeback_retry_never_runs_the_agent(self):
         from types import SimpleNamespace
 

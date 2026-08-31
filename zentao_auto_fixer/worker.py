@@ -14,8 +14,11 @@ from .agent_runner import AgentError, AgentQuotaError, TriageResultError, run_ag
 from .config import Settings
 from .git_ops import (
     GitError,
+    RebaseConflictError,
+    abort_rebase,
     changed_files,
     commit_all,
+    continue_rebase,
     create_detached_worktree,
     ensure_repo_cache,
     export_patch,
@@ -23,6 +26,7 @@ from .git_ops import (
     head_commit,
     push_head_dry_run,
     push_head_to_branch,
+    rebase_onto_latest_remote,
     remove_worktree,
     repo_cache_name,
     reset_hard_clean,
@@ -326,7 +330,14 @@ class Worker:
                 self._record_no_progress()
                 LOGGER.info("Worker finished batch %s with nothing to commit", batch_label)
                 return
-            self._commit_push_and_resolve(fixed, checkouts, verdicts, batch_label)
+            self._commit_push_and_resolve(
+                fixed,
+                checkouts,
+                verdicts,
+                batch_label,
+                project.agent,
+                project.allow_full_xcodebuild,
+            )
         except Exception as exc:
             unfinished = [run for run in batch if _still_running(self.state, run.bug_id)]
             self._fail_batch(unfinished, "failed", str(exc), "", count_no_progress=True)
@@ -524,6 +535,8 @@ class Worker:
         checkouts: Dict[str, "_Checkout"],
         verdicts: Dict[int, Dict[str, Any]],
         batch_label: str,
+        agent: str,
+        allow_full_xcodebuild: bool,
     ) -> None:
         bug_ids = [run.bug_id for run in fixed]
         changed = [checkout for checkout in checkouts.values() if checkout.has_work()]
@@ -547,7 +560,6 @@ class Worker:
             return
 
         commit_message = f"fix: zentao batch {batch_label}"
-        commits: List[str] = []
         for checkout in changed:
             if has_changes(checkout.worktree):
                 self.state.record_run_events(bug_ids, f"commit_start_{checkout.kind}", commit_message)
@@ -559,8 +571,20 @@ class Worker:
                 )
             else:
                 commit_hash = head_commit(checkout.worktree)
-            commits.append(f"{checkout.kind}:{commit_hash}")
             self.state.record_run_events(bug_ids, f"commit_done_{checkout.kind}", commit_hash)
+
+        if not self._rebase_changed_checkouts(
+            fixed,
+            changed,
+            checkouts,
+            verdicts,
+            batch_label,
+            agent,
+            allow_full_xcodebuild,
+        ):
+            return
+
+        commits = [f"{checkout.kind}:{head_commit(checkout.worktree)}" for checkout in changed]
 
         # Dry-run every repository first: a rejection here costs nothing, a rejection
         # half-way through a multi-repo push leaves the fix split across branches.
@@ -612,6 +636,135 @@ class Worker:
         self._comment_and_resolve(fixed, verdicts, commit_summary)
         urls = ", ".join(bug_view_url(run.bug_id) for run in fixed)
         LOGGER.info("Worker pushed batch %s commits=%s urls=%s", batch_label, commit_summary, urls)
+
+    def _rebase_changed_checkouts(
+        self,
+        fixed: List[RunRecord],
+        changed: List["_Checkout"],
+        checkouts: Dict[str, "_Checkout"],
+        verdicts: Dict[int, Dict[str, Any]],
+        batch_label: str,
+        agent: str,
+        allow_full_xcodebuild: bool,
+    ) -> bool:
+        bug_ids = [run.bug_id for run in fixed]
+        conflict_retry_used = False
+        for checkout in changed:
+            old_baseline = checkout.baseline
+            self.state.record_run_events(bug_ids, f"refresh_remote_{checkout.kind}", checkout.target_branch)
+            try:
+                latest = rebase_onto_latest_remote(
+                    checkout.worktree,
+                    checkout.target_branch,
+                    checkout.baseline,
+                    timeout=self.settings.git_timeout_seconds,
+                    shallow=self.settings.git_shallow_clone,
+                )
+            except RebaseConflictError as exc:
+                reason = ""
+                if conflict_retry_used:
+                    reason = "A second repository conflict occurred after the automatic conflict retry was used."
+                elif not self._claim_agent_budget():
+                    reason = self._agent_budget_block_reason()
+                if reason:
+                    self._abort_conflict_and_fail(fixed, changed, checkout, batch_label, reason)
+                    return False
+
+                conflict_retry_used = True
+                self.state.record_run_events(
+                    bug_ids,
+                    f"conflict_agent_start_{checkout.kind}",
+                    f"latest={exc.latest}",
+                )
+                result_path = self.settings.logs_dir / f"batch-{bug_ids[0]}-{bug_ids[-1]}-conflict-triage.json"
+                agent_log = self.settings.logs_dir / f"batch-{bug_ids[0]}-{bug_ids[-1]}-conflict-agent.log"
+                other_heads = {
+                    other.kind: head_commit(other.worktree)
+                    for other in checkouts.values()
+                    if other is not checkout
+                }
+                try:
+                    conflict_verdicts = run_agent_batch_fix(
+                        agent,
+                        self.settings.agent_bin(agent),
+                        self.settings.zentao_client_script,
+                        checkouts["app"].worktree,
+                        checkouts.get("backend").worktree if checkouts.get("backend") else None,
+                        [(run.bug_id, run.title) for run in fixed],
+                        result_path,
+                        agent_log,
+                        timeout_seconds=self.settings.codex_timeout_seconds,
+                        allow_full_xcodebuild=allow_full_xcodebuild,
+                        conflict_context=f"{checkout.kind} 仓库 {checkout.worktree}",
+                    )
+                    rejected = [bug_id for bug_id, verdict in conflict_verdicts.items() if verdict["decision"] != "fixed"]
+                    if rejected:
+                        raise TriageResultError(
+                            "Conflict resolver rejected " + ", ".join(f"#{bug_id}" for bug_id in rejected)
+                        )
+                    touched_others = [
+                        other.kind
+                        for other in checkouts.values()
+                        if other is not checkout
+                        and (
+                            has_changes(other.worktree)
+                            or head_commit(other.worktree) != other_heads[other.kind]
+                        )
+                    ]
+                    if touched_others:
+                        raise TriageResultError(
+                            "Conflict resolver modified unrelated repositories: " + ", ".join(touched_others)
+                        )
+                    continue_rebase(checkout.worktree, timeout=self.settings.git_timeout_seconds)
+                except Exception as retry_error:
+                    self._abort_conflict_and_fail(
+                        fixed,
+                        changed,
+                        checkout,
+                        batch_label,
+                        f"Automatic conflict resolution failed: {retry_error}",
+                    )
+                    return False
+                verdicts.update(conflict_verdicts)
+                for run in fixed:
+                    self.state.set_triage_targets(
+                        run.bug_id,
+                        ",".join(conflict_verdicts[run.bug_id]["targets"]),
+                    )
+                checkout.baseline = exc.latest
+                self.state.record_run_events(
+                    bug_ids,
+                    f"conflict_agent_done_{checkout.kind}",
+                    f"latest={exc.latest} head={head_commit(checkout.worktree)}",
+                )
+                continue
+
+            if latest != old_baseline:
+                checkout.baseline = latest
+                self.state.record_run_events(
+                    bug_ids,
+                    f"rebased_{checkout.kind}",
+                    f"from={old_baseline} onto={latest} head={head_commit(checkout.worktree)}",
+                )
+        return True
+
+    def _abort_conflict_and_fail(
+        self,
+        fixed: List[RunRecord],
+        changed: List["_Checkout"],
+        conflicted: "_Checkout",
+        batch_label: str,
+        reason: str,
+    ) -> None:
+        try:
+            abort_rebase(conflicted.worktree, timeout=self.settings.git_timeout_seconds)
+        except GitError as abort_error:
+            reason += f"; rebase abort also failed: {abort_error}"
+        patches = [self._save_conflict_patch(checkout, batch_label) for checkout in changed]
+        saved = [path for path in patches if path]
+        if saved:
+            reason += "\nSaved patches: " + ", ".join(saved)
+        self._fail_batch(fixed, "retry_exhausted", reason, "", count_no_progress=True)
 
     def _comment_and_resolve(
         self,

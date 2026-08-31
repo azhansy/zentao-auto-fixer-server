@@ -12,6 +12,12 @@ class GitError(RuntimeError):
     pass
 
 
+class RebaseConflictError(GitError):
+    def __init__(self, message: str, latest: str):
+        super().__init__(message)
+        self.latest = latest
+
+
 @dataclass(frozen=True)
 class RepoSyncResult:
     path: Path
@@ -121,6 +127,40 @@ def reset_hard_clean(repo: Path, commit: str) -> None:
 def push_head_dry_run(repo: Path, target_branch: str) -> None:
     """Fail here rather than half-way through pushing several repositories."""
     run_git(["push", "--dry-run", "origin", f"HEAD:{target_branch}"], cwd=repo)
+
+
+def rebase_onto_latest_remote(
+    repo: Path,
+    target_branch: str,
+    baseline: str,
+    *,
+    timeout: Optional[int] = None,
+    shallow: bool = True,
+) -> str:
+    """Replay local fix commits when the target branch moved while the agent was working."""
+    fetch_ref = f"+refs/heads/{target_branch}:refs/remotes/origin/{target_branch}"
+    fetch_args = ["fetch", "origin", fetch_ref, "--prune"]
+    if shallow:
+        fetch_args.extend(["--depth", "1"])
+    run_git(fetch_args, cwd=repo, timeout=timeout)
+    latest = run_git(["rev-parse", f"origin/{target_branch}"], cwd=repo, timeout=timeout)
+    if latest == baseline:
+        return baseline
+    old_head = head_commit(repo)
+    try:
+        run_git(["rebase", "--onto", latest, baseline, old_head], cwd=repo, timeout=timeout)
+    except GitError as exc:
+        raise RebaseConflictError(str(exc), latest) from exc
+    return latest
+
+
+def continue_rebase(repo: Path, *, timeout: Optional[int] = None) -> None:
+    run_git(["add", "-A"], cwd=repo, timeout=timeout)
+    run_git(["-c", "core.editor=true", "rebase", "--continue"], cwd=repo, timeout=timeout)
+
+
+def abort_rebase(repo: Path, *, timeout: Optional[int] = None) -> None:
+    run_git(["rebase", "--abort"], cwd=repo, timeout=timeout)
 
 
 def export_patch(repo: Path, baseline: str) -> str:

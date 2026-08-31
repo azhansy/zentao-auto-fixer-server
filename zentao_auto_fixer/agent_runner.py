@@ -37,6 +37,7 @@ def run_agent_batch_fix(
     timeout_seconds: Optional[int] = None,
     env_overrides: Optional[Dict[str, str]] = None,
     allow_full_xcodebuild: bool = False,
+    conflict_context: str = "",
 ) -> Dict[int, Dict[str, Any]]:
     """Triage and fix a batch of bugs, returning the agent's per-bug verdict keyed by bug id."""
     result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -49,6 +50,7 @@ def run_agent_batch_fix(
         backend_worktree,
         result_path,
         allow_full_xcodebuild=allow_full_xcodebuild,
+        conflict_context=conflict_context,
     )
     _run_agent(
         agent,
@@ -71,6 +73,7 @@ def _batch_prompt(
     backend_worktree: Optional[Path],
     result_path: Path,
     allow_full_xcodebuild: bool = False,
+    conflict_context: str = "",
 ) -> str:
     bug_lines = "\n".join(f"- #{bug_id}: {title}" for bug_id, title in bugs)
     bug_ids = ", ".join(f"#{bug_id}" for bug_id, _title in bugs)
@@ -86,7 +89,15 @@ def _batch_prompt(
         else "只运行与改动直接相关的测试用例，测试通过即可。禁止运行 xcodebuild build/archive 等完整构建；"
         "允许运行目标明确的单元测试，但不要扩大成全量编译。"
     )
+    conflict_instruction = (
+        f"\n当前代码正在自动同步最新目标分支，存在需要解决的 Git 内容冲突：{conflict_context}\n"
+        "先逐个解决所有冲突标记，必须同时保留远端的新改动和本次 Bug 修复意图，禁止简单整段选择任意一侧。"
+        "解决后重新运行与改动直接相关的测试。不要执行任何 git 命令，外层服务会继续 rebase。\n"
+        if conflict_context
+        else ""
+    )
     return f"""在同一个批次内先分诊、再修复以下禅道 Bugs：{bug_ids}。
+{conflict_instruction}
 
 Bug 列表：
 {bug_lines}
