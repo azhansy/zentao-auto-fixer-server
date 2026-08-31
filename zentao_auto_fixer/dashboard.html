@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>禅道自动修复看板</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1020;
+      --panel: #121a2d;
+      --line: #25304a;
+      --muted: #94a3b8;
+      --text: #e5e7eb;
+      --blue: #60a5fa;
+      --green: #34d399;
+      --red: #fb7185;
+      --yellow: #fbbf24;
+      --violet: #a78bfa;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { width: min(1480px, calc(100% - 32px)); margin: 0 auto; padding: 28px 0 48px; }
+    header { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+    h1, h2 { margin: 0; }
+    h1 { font-size: 24px; }
+    h2 { font-size: 16px; }
+    .muted, #refresh-state { color: var(--muted); }
+    .stats { display: grid; grid-template-columns: repeat(6, minmax(110px, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .stat, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+    .stat { padding: 14px 16px; }
+    .stat strong { display: block; margin-top: 5px; font-size: 25px; }
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 440px); gap: 16px; align-items: start; }
+    .panel { overflow: hidden; }
+    .panel-head { min-height: 58px; padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    select { color: var(--text); background: #0f172a; border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px; }
+    .table-wrap { overflow: auto; max-height: 620px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; white-space: nowrap; }
+    th { position: sticky; top: 0; z-index: 1; background: #172036; color: var(--muted); font-size: 12px; }
+    td.title { white-space: normal; min-width: 260px; }
+    tr[data-bug-id] { cursor: pointer; }
+    tr[data-bug-id]:hover, tr.selected { background: #1a2540; }
+    .badge { display: inline-flex; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 650; background: #334155; }
+    .success { color: var(--green); background: #064e3b; }
+    .failure { color: var(--red); background: #4c0519; }
+    .running { color: var(--blue); background: #172554; }
+    .queued { color: var(--yellow); background: #422006; }
+    .other { color: #c4b5fd; background: #2e1065; }
+    .detail { padding: 16px; }
+    .detail-grid { display: grid; grid-template-columns: 86px minmax(0, 1fr); gap: 7px 10px; margin: 12px 0 18px; }
+    .detail-grid dt { color: var(--muted); }
+    .detail-grid dd { margin: 0; overflow-wrap: anywhere; }
+    .error { color: #fecdd3; white-space: pre-wrap; }
+    .timeline { list-style: none; margin: 12px 0 0; padding: 0 0 0 15px; border-left: 2px solid var(--line); max-height: 440px; overflow: auto; }
+    .timeline li { position: relative; padding: 0 0 15px 13px; }
+    .timeline li::before { content: ""; position: absolute; left: -20px; top: 5px; width: 8px; height: 8px; border-radius: 50%; background: var(--violet); }
+    .timeline time { display: block; color: var(--muted); font-size: 12px; }
+    .timeline p { margin: 3px 0 0; color: #cbd5e1; overflow-wrap: anywhere; }
+    .polls { margin-top: 16px; }
+    .empty { padding: 28px 16px; text-align: center; color: var(--muted); }
+    @media (max-width: 980px) {
+      .stats { grid-template-columns: repeat(3, 1fr); }
+      .layout { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 560px) {
+      main { width: min(100% - 20px, 1480px); padding-top: 18px; }
+      header { align-items: start; flex-direction: column; }
+      .stats { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>禅道自动修复看板</h1>
+      <div class="muted">任务状态与 SQLite 真实事件流水</div>
+    </div>
+    <div id="refresh-state" aria-live="polite">正在加载…</div>
+  </header>
+
+  <section class="stats" aria-label="任务汇总">
+    <div class="stat"><span class="muted">全部任务</span><strong id="count-all">0</strong></div>
+    <div class="stat"><span class="muted">成功修复</span><strong id="count-success">0</strong></div>
+    <div class="stat"><span class="muted">失败</span><strong id="count-failure">0</strong></div>
+    <div class="stat"><span class="muted">进行中</span><strong id="count-running">0</strong></div>
+    <div class="stat"><span class="muted">排队</span><strong id="count-queued">0</strong></div>
+    <div class="stat"><span class="muted">其他终态</span><strong id="count-other">0</strong></div>
+  </section>
+
+  <div class="layout">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>处理任务</h2>
+        <label>状态
+          <select id="filter">
+            <option value="all">全部</option>
+            <option value="success">成功</option>
+            <option value="failure">失败</option>
+            <option value="running">进行中</option>
+            <option value="queued">排队</option>
+            <option value="other">其他终态</option>
+          </select>
+        </label>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Bug</th><th>标题</th><th>项目</th><th>状态</th><th>更新时间</th></tr></thead>
+          <tbody id="runs"></tbody>
+        </table>
+        <div id="runs-empty" class="empty" hidden>没有符合条件的任务</div>
+      </div>
+    </section>
+
+    <aside class="panel">
+      <div class="panel-head"><h2 id="detail-title">处理流水</h2></div>
+      <div id="detail" class="detail empty">点击左侧 Bug 查看完整流水</div>
+    </aside>
+  </div>
+
+  <section class="panel polls">
+    <div class="panel-head"><h2>最近轮询流水</h2></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>时间</th><th>项目</th><th>状态</th><th>未解决</th><th>候选</th><th>入队</th><th>错误</th></tr></thead>
+        <tbody id="polls"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+  const statusLabels = {
+    queued: "排队", running: "进行中", pushed: "成功修复", failed: "失败",
+    sync_conflict: "同步冲突", retry_exhausted: "重试耗尽",
+    writeback_queued: "等待回写", writeback_failed: "回写失败", writeback_exhausted: "回写耗尽",
+    unable_to_fix: "无法定位", handled_in_zentao: "禅道已处理", manual_required: "待人工",
+    skipped_stale: "已过期", skipped_ui: "跳过 UI", skipped_platform: "跳过平台",
+    rejected_to_reporter: "旧版退回", no_changes: "无代码改动"
+  };
+  const failureStatuses = new Set(["failed", "sync_conflict", "retry_exhausted", "writeback_failed", "writeback_exhausted"]);
+  const queuedStatuses = new Set(["queued", "writeback_queued"]);
+  let runs = [];
+  let selectedBug = null;
+  let refreshing = false;
+
+  const byId = id => document.getElementById(id);
+  const textNode = (tag, text, className = "") => {
+    const node = document.createElement(tag);
+    node.textContent = text ?? "";
+    if (className) node.className = className;
+    return node;
+  };
+  const category = status => status === "pushed" ? "success"
+    : failureStatuses.has(status) ? "failure"
+    : status === "running" ? "running"
+    : queuedStatuses.has(status) ? "queued" : "other";
+  const localTime = value => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "-";
+
+  function renderSummary() {
+    const counts = { all: runs.length, success: 0, failure: 0, running: 0, queued: 0, other: 0 };
+    runs.forEach(run => counts[category(run.status)]++);
+    Object.entries(counts).forEach(([key, value]) => byId(`count-${key}`).textContent = value);
+  }
+
+  function renderRuns() {
+    const body = byId("runs");
+    body.replaceChildren();
+    const filter = byId("filter").value;
+    const visible = runs.filter(run => filter === "all" || category(run.status) === filter);
+    visible.forEach(run => {
+      const row = document.createElement("tr");
+      row.dataset.bugId = run.bug_id;
+      if (run.bug_id === selectedBug) row.className = "selected";
+      row.append(textNode("td", `#${run.bug_id}`));
+      row.append(textNode("td", run.title || "-", "title"));
+      row.append(textNode("td", run.project_name || "-"));
+      const statusCell = document.createElement("td");
+      statusCell.append(textNode("span", statusLabels[run.status] || run.status, `badge ${category(run.status)}`));
+      row.append(statusCell);
+      row.append(textNode("td", localTime(run.updated_at)));
+      row.addEventListener("click", () => showRun(run));
+      body.append(row);
+    });
+    byId("runs-empty").hidden = visible.length !== 0;
+  }
+
+  async function showRun(run) {
+    selectedBug = run.bug_id;
+    renderRuns();
+    byId("detail-title").textContent = `#${run.bug_id} 处理流水`;
+    const detail = byId("detail");
+    detail.className = "detail";
+    detail.replaceChildren();
+    const grid = document.createElement("dl");
+    grid.className = "detail-grid";
+    const fields = [
+      ["标题", run.title || "-"], ["项目", run.project_name || "-"],
+      ["状态", statusLabels[run.status] || run.status], ["分支", run.target_branch || "-"],
+      ["提交", run.commit_hash || "-"], ["更新时间", localTime(run.updated_at)],
+      ["错误", run.error || "-"]
+    ];
+    fields.forEach(([label, value]) => {
+      grid.append(textNode("dt", label));
+      grid.append(textNode("dd", value, label === "错误" && value !== "-" ? "error" : ""));
+    });
+    detail.append(grid, textNode("h2", "事件日志"));
+    const timeline = document.createElement("ol");
+    timeline.className = "timeline";
+    detail.append(timeline);
+    try {
+      const response = await fetch(`/runs/${run.bug_id}/events?limit=500`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const events = (await response.json()).events || [];
+      if (!events.length) timeline.append(textNode("li", "暂无事件"));
+      events.forEach(event => {
+        const item = document.createElement("li");
+        item.append(textNode("strong", event.event), textNode("time", localTime(event.created_at)));
+        if (event.message) item.append(textNode("p", event.message));
+        timeline.append(item);
+      });
+    } catch (error) {
+      timeline.append(textNode("li", `流水加载失败：${error.message}`, "error"));
+    }
+  }
+
+  function renderPolls(polls) {
+    const body = byId("polls");
+    body.replaceChildren();
+    polls.forEach(poll => {
+      const row = document.createElement("tr");
+      [localTime(poll.started_at), poll.project_name, poll.status, poll.unresolved_bugs,
+        poll.candidate_bugs, poll.queued_bugs, poll.error || "-"].forEach((value, index) => {
+          row.append(textNode("td", value, index === 6 && value !== "-" ? "error" : ""));
+        });
+      body.append(row);
+    });
+  }
+
+  async function refresh() {
+    if (refreshing) return;
+    refreshing = true;
+    try {
+      const [runsResponse, pollsResponse] = await Promise.all([
+        fetch("/runs?limit=500"), fetch("/polls?limit=100")
+      ]);
+      if (!runsResponse.ok || !pollsResponse.ok) throw new Error(`HTTP ${runsResponse.status}/${pollsResponse.status}`);
+      runs = (await runsResponse.json()).runs || [];
+      const polls = (await pollsResponse.json()).polls || [];
+      renderSummary();
+      renderRuns();
+      renderPolls(polls);
+      if (selectedBug) {
+        const current = runs.find(run => run.bug_id === selectedBug);
+        if (current) await showRun(current);
+      }
+      byId("refresh-state").textContent = `每 5 秒刷新 · ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
+    } catch (error) {
+      byId("refresh-state").textContent = `刷新失败：${error.message}`;
+    } finally {
+      refreshing = false;
+    }
+  }
+
+  byId("filter").addEventListener("change", renderRuns);
+  refresh();
+  setInterval(refresh, 5000);
+</script>
+</body>
+</html>

@@ -7,6 +7,21 @@ from types import SimpleNamespace
 from zentao_auto_fixer.server import make_handler
 
 
+def get(app, path):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app))
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+        connection.request("GET", path)
+        response = connection.getresponse()
+        return response.status, dict(response.getheaders()), response.read()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 class HealthTests(unittest.TestCase):
     def test_failed_run_degrades_health(self):
         app = SimpleNamespace(
@@ -16,23 +31,30 @@ class HealthTests(unittest.TestCase):
                 run_summary_since=lambda _since: {"queued": 3, "running": 1},
             ),
         )
-        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app))
-        thread = threading.Thread(target=server.serve_forever)
-        thread.start()
-        try:
-            connection = http.client.HTTPConnection(*server.server_address, timeout=2)
-            connection.request("GET", "/health")
-            response = connection.getresponse()
+        status, _headers, body = get(app, "/health")
 
-            self.assertEqual(response.status, 503)
-            self.assertEqual(
-                response.read(),
-                b'{"ok": false, "problems": 2, "queued": 3, "running": 1}',
-            )
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join()
+        self.assertEqual(status, 503)
+        self.assertEqual(body, b'{"ok": false, "problems": 2, "queued": 3, "running": 1}')
+
+
+class DashboardTests(unittest.TestCase):
+    def test_root_serves_dashboard(self):
+        status, headers, body = get(SimpleNamespace(), "/")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
+        self.assertIn("禅道自动修复看板".encode(), body)
+        self.assertIn(b"/runs?limit=500", body)
+
+    def test_runs_honors_bounded_limit(self):
+        seen = []
+        app = SimpleNamespace(state=SimpleNamespace(list_runs=lambda limit: seen.append(limit) or []))
+
+        status, _headers, body = get(app, "/runs?limit=9999")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b'{"runs": []}')
+        self.assertEqual(seen, [500])
 
 
 if __name__ == "__main__":

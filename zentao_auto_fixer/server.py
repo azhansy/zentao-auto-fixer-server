@@ -7,6 +7,7 @@ import signal
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
@@ -18,6 +19,7 @@ from .zentao import bug_view_url
 
 
 LOGGER = logging.getLogger("zentao_auto_fixer")
+DASHBOARD_PATH = Path(__file__).with_name("dashboard.html")
 
 
 class App:
@@ -66,6 +68,9 @@ def make_handler(app: App):
 
         def do_GET(self) -> None:
             path, query = _path_and_query(self.path)
+            if path == "/":
+                self._html(HTTPStatus.OK, DASHBOARD_PATH.read_bytes())
+                return
             if path == "/health":
                 failed = app.state.current_problem_count()
                 summary = app.state.run_summary_since(app.started_at)
@@ -75,7 +80,7 @@ def make_handler(app: App):
                 )
                 return
             if path == "/runs":
-                self._json(HTTPStatus.OK, {"runs": app.state.list_runs()})
+                self._json(HTTPStatus.OK, {"runs": app.state.list_runs(_limit_from_query(query))})
                 return
             if path == "/polls":
                 self._json(
@@ -120,6 +125,13 @@ def make_handler(app: App):
             data = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
             self.send_response(status.value)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _html(self, status: HTTPStatus, data: bytes) -> None:
+            self.send_response(status.value)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
