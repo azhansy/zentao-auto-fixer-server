@@ -75,7 +75,7 @@ class Settings:
             claude_bin=os.getenv("AUTO_FIXER_CLAUDE_BIN", "claude"),
             codex_attempts=max(1, int(os.getenv("AUTO_FIXER_CODEX_ATTEMPTS", "3"))),
             codex_retry_delay_seconds=max(0, int(os.getenv("AUTO_FIXER_CODEX_RETRY_DELAY_SECONDS", "15"))),
-            codex_timeout_seconds=_optional_positive_int_env("AUTO_FIXER_CODEX_TIMEOUT_SECONDS", 1800),
+            codex_timeout_seconds=_optional_positive_int_env("AUTO_FIXER_CODEX_TIMEOUT_SECONDS", 3600),
             zentao_client_script=_zentao_client_script_from_env(),
             git_timeout_seconds=max(30, int(os.getenv("AUTO_FIXER_GIT_TIMEOUT_SECONDS", "1800"))),
             git_shallow_clone=_bool_env("AUTO_FIXER_GIT_SHALLOW_CLONE", True),

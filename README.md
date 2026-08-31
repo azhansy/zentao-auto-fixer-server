@@ -173,7 +173,7 @@ python3 -m zentao_auto_fixer.server
 | `AUTO_FIXER_PROJECTS_FILE` | 多项目映射文件路径。 |
 | `AUTO_FIXER_CODEX_BIN` | Codex CLI 路径，默认 `codex`。 |
 | `AUTO_FIXER_CLAUDE_BIN` | Claude Code CLI 路径，默认 `claude`；`agent=claude` 的项目会用它。 |
-| `AUTO_FIXER_CODEX_TIMEOUT_SECONDS` | AI 引擎单次执行最长时间，默认 `1800` 秒；设为 `0` 表示不限制。两种引擎共用。 |
+| `AUTO_FIXER_CODEX_TIMEOUT_SECONDS` | AI 引擎单次执行最长时间，默认 `3600` 秒；设为 `0` 表示不限制。两种引擎共用。 |
 | `AUTO_FIXER_ZENTAO_CLIENT` | `zentao-bug-fixer` skill 的禅道 helper 路径，默认可填 `auto`。 |
 | `ZENTAO_BASE_URL` | 禅道根地址。 |
 | `ZENTAO_ACCOUNT` / `ZENTAO_PASSWORD` | 禅道账号密码。 |

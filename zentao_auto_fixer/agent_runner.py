@@ -88,8 +88,11 @@ def _batch_prompt(
     verification_rule = (
         "可以按需运行完整 xcodebuild 构建，但必须同步等待结束。"
         if allow_full_xcodebuild
-        else "只运行与改动直接相关的测试用例，测试通过即可。禁止运行 xcodebuild build/archive 等完整构建；"
-        "允许运行目标明确的单元测试，但不要扩大成全量编译。"
+        else "只运行与改动直接相关的测试用例，测试通过即可。"
+        "禁止构建 APK/AAB，禁止运行 Android assemble/bundle/package/install 任务，"
+        "禁止运行 gradlew --stop，避免终止其他并发任务的测试。"
+        "禁止运行 xcodebuild build/archive 等完整构建；"
+        "只允许目标明确的单元测试，不要扩大成全量编译。"
     )
     conflict_instruction = (
         f"\n当前代码正在自动同步最新目标分支，存在需要解决的 Git 内容冲突：{conflict_context}\n"

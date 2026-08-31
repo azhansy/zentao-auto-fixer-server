@@ -119,6 +119,8 @@ class AgentCommandTests(unittest.TestCase):
         )
         self.assertIn("禁止运行 xcodebuild build/archive 等完整构建", prompt)
         self.assertIn("只运行与改动直接相关的测试用例", prompt)
+        self.assertIn("禁止构建 APK/AAB", prompt)
+        self.assertIn("禁止运行 gradlew --stop", prompt)
 
     def test_prompt_can_allow_full_xcodebuild(self):
         prompt = _batch_prompt(
