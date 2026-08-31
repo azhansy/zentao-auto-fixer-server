@@ -5,8 +5,11 @@
       "enabled": true,
       "zentaoProductId": 8,
       "zentaoAssignedTo": "",
-      "agent": "codex",
+      "agent": "claude",
+      "fallbackAgent": "codex",
       "skipPlatforms": ["android", "mac"],
+      "processUiBugs": false,
+      "allowFullXcodeBuild": false,
       "app": {
         "repoUrl": "git@github.com:group/product-a-app.git",
         "targetBranch": "dev"
@@ -24,6 +27,8 @@
       "zentaoProductId": 12,
       "zentaoAssignedTo": "",
       "agent": "claude",
+      "processUiBugs": false,
+      "allowFullXcodeBuild": false,
       "repoUrl": "git@github.com:group/product-b.git",
       "targetBranch": "main",
       "onlyCodeBugs": true,

@@ -56,8 +56,8 @@ Auto Fixer Server
 4. poller 只保留符合自动修复条件的 Bug。
 5. 对每个符合条件的 Bug，先查 SQLite 本地状态。
 6. 如果本地没有处理记录，写入 `queued` 并投递 worker。
-7. 如果本地已经有自动处理记录，不再投递 worker。
-8. 如果本地已经处理过，但这个 Bug 又重新出现在待修复列表，标记为 `manual_required`。
+7. 成功或明确无法修复的终态不再投递；技术失败在新 Bug 之后自动重试一次。
+8. 代码已推送但禅道回写失败时只重试回写，不再次调用 AI。
 9. worker 批量处理队列里的 Bug。同一个 Git 项目同一时间只允许一个批次执行；同项目、同仓库、同分支中已经 queued 的 Bug 会合成一个批次。
 
 ## 多项目同步策略
@@ -108,7 +108,7 @@ Auto Fixer Server
 
 1. 按项目映射顺序扫描产品。
 2. 每个产品先筛选可自动修复 Bug。
-3. 每个产品按优先级、严重程度、Bug ID 排序。
+3. 每个产品先处理从未执行的 Bug，再处理技术重试；组内按创建时间从旧到新。
 4. 每个产品最多入队 `maxBugsPerPoll` 个。
 5. worker 按仓库和分支认领 queued Bug，生成一个批次。
 6. Codex 在同一个 worktree 内读取并修复批次里的全部 Bug。
@@ -134,8 +134,7 @@ Bug 不满足以下任意情况时跳过：
 - 类型不是代码问题。
 - 已关闭。
 - 已经自动修复过。
-- 本地状态是 `running`、`pushed`、`no_changes`。
-- 本地状态是 `manual_required`。
+- 本地状态是 `running`、`pushed`、`unable_to_fix`、`retry_exhausted`。
 - Bug 描述缺少复现步骤，后续可作为可配置策略。
 
 ## 状态规则
@@ -145,23 +144,24 @@ Bug 不满足以下任意情况时跳过：
 核心规则：
 
 1. `bug_id` 第一次被轮询发现且符合条件，创建一条 `queued` 任务。
-2. 后台 worker 处理任务，状态依次变为 `running`、`pushed`、`no_changes`、`manual_required`、`sync_conflict` 或 `failed`。
-3. 只要某个 `bug_id` 已经有过自动处理记录，后续轮询发现它仍然待处理，也不会再次触发自动修复。
-4. 如果本地记录显示已经自动修复过，但禅道又显示它是激活、打开、指派中等待修复状态，状态标记为 `manual_required`。
-5. `failed` 是否允许重试单独配置。默认不自动重试，避免同一个 Bug 反复消耗 Codex 和污染分支。
+2. 后台 worker 处理任务，只有代码改动、相关测试、commit、push 都成功后才写禅道备注并进入 `pushed`。
+3. 无代码改动或 AI 明确无法定位时进入 `unable_to_fix`，不写禅道、不重新指派。
+4. `failed`、`sync_conflict`、重新激活的 `skipped_stale` 自动重试一次，仍失败进入 `retry_exhausted`。
+5. `writeback_failed` 只重试成功备注和解决操作，不重新运行 AI。
 
 ## 重新激活判断
 
 轮询模式不像 webhook 那样天然知道“某次事件是重新激活”。因此重新激活用本地状态和禅道当前状态共同推断：
 
 ```text
-本地 handled_once = 1
-并且本地状态属于 pushed / no_changes
-并且禅道当前状态又回到 active/open/assigned 等待处理
-=> manual_required
+禅道已有 AI 成功备注或本地状态为 pushed
+=> 不再处理
+
+本地状态为技术失败且禅道仍 active、没有 AI 完成备注
+=> 在新 Bug 之后重试一次
 ```
 
-这个规则符合“修复一次后如果再次被激活，就不用处理，留给开发手动处理”。
+明确无法修复的结果只保存在本地；技术失败不会冒充“无法修复”。
 
 ## 目标分支提交
 
@@ -190,7 +190,7 @@ push 失败时不做 force push。典型失败处理：
 
 - 如果是认证失败，任务 `failed`。
 - 如果是远端分支更新导致非 fast-forward，任务 `sync_conflict`。
-- 如果是代码冲突，不自动解决，任务 `failed` 或 `manual_required`。
+- 如果是代码冲突，不强推，任务进入 `sync_conflict` 并最多自动重试一次。
 
 ## 配置
 
@@ -241,7 +241,7 @@ codex exec \
 - 每个批次开始前同步远端目标分支。
 - 禁用 force push。
 - push 失败不自动覆盖远端。
-- `failed` 默认不自动重试。
+- 技术失败最多自动重试一次，每次 AI 启动都受持久化日限额约束。
 - 建议目标分支启用 GitLab 保护策略，只允许服务账号推送到指定分支。
 - 建议服务账号只给必要仓库权限。
 

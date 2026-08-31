@@ -16,6 +16,10 @@ class AgentError(RuntimeError):
     pass
 
 
+class AgentQuotaError(AgentError):
+    pass
+
+
 
 class TriageResultError(RuntimeError):
     pass
@@ -32,12 +36,20 @@ def run_agent_batch_fix(
     log_path: Optional[Path] = None,
     timeout_seconds: Optional[int] = None,
     env_overrides: Optional[Dict[str, str]] = None,
+    allow_full_xcodebuild: bool = False,
 ) -> Dict[int, Dict[str, Any]]:
     """Triage and fix a batch of bugs, returning the agent's per-bug verdict keyed by bug id."""
     result_path.parent.mkdir(parents=True, exist_ok=True)
     if result_path.exists():
         result_path.unlink()
-    prompt = _batch_prompt(bugs, zentao_client_script, app_worktree, backend_worktree, result_path)
+    prompt = _batch_prompt(
+        bugs,
+        zentao_client_script,
+        app_worktree,
+        backend_worktree,
+        result_path,
+        allow_full_xcodebuild=allow_full_xcodebuild,
+    )
     _run_agent(
         agent,
         agent_bin,
@@ -58,6 +70,7 @@ def _batch_prompt(
     app_worktree: Path,
     backend_worktree: Optional[Path],
     result_path: Path,
+    allow_full_xcodebuild: bool = False,
 ) -> str:
     bug_lines = "\n".join(f"- #{bug_id}: {title}" for bug_id, title in bugs)
     bug_ids = ", ".join(f"#{bug_id}" for bug_id, _title in bugs)
@@ -67,6 +80,12 @@ def _batch_prompt(
     else:
         repo_lines.append("- backend：本项目没有配置后端仓库，判定为后端问题时只能标记为 rejected。")
     repos = "\n".join(repo_lines)
+    verification_rule = (
+        "可以按需运行完整 xcodebuild 构建，但必须同步等待结束。"
+        if allow_full_xcodebuild
+        else "只运行与改动直接相关的测试用例，测试通过即可。禁止运行 xcodebuild build/archive 等完整构建；"
+        "允许运行目标明确的单元测试，但不要扩大成全量编译。"
+    )
     return f"""在同一个批次内先分诊、再修复以下禅道 Bugs：{bug_ids}。
 
 Bug 列表：
@@ -82,7 +101,7 @@ Bug 列表：
 3. 如果读完详情仍然判断不出是什么问题（描述不足、无法定位到代码），不要猜着改，把这个 Bug 标记为 rejected。
    标记 rejected 之前，必须把你为它做过的试探性改动全部还原，不能留在工作区里。
 4. 只修改上面列出的仓库路径里的文件，不要处理列表外的 Bug。
-5. 修完运行仓库里最相关的验证命令，必须同步等它跑完拿到结果再继续。这次调用结束后不会再有下一轮、
+5. {verification_rule} 验证命令必须同步等它跑完拿到结果再继续。这次调用结束后不会再有下一轮、
    没有人会去看你有没有跑完，禁止把编译、构建、测试放到后台异步执行，然后自己说"稍后继续"或"等待完成通知"
    就先退出——那样这次调用就白跑了。验证产生的临时文件、日志、笔记请自行删除，不要留在工作区。
 6. 禁止执行 git commit、git push、git reset、git checkout 等任何改变仓库状态的 git 命令。
@@ -97,7 +116,8 @@ Bug 列表：
        {{"id": 1234, "decision": "fixed", "targets": ["app"], "platform": "ios",
          "understanding": "用一两句话复述你理解的这个 Bug 是什么现象",
          "steps": ["1. 打开某页面", "2. 点击某按钮", "3. 出现什么错误现象"],
-         "cause": "问题原因，一到三句话", "solution": "改了什么，一到三句话"}},
+         "cause": "问题原因，一到三句话", "solution": "改了什么，一到三句话",
+         "verification": {{"command": "实际同步执行的测试命令", "passed": true}}}},
        {{"id": 1235, "decision": "rejected",
          "understanding": "你理解到的部分，看不懂就写你的猜测",
          "steps": ["从描述里能还原出来的操作步骤，还原不出就留空数组"],
@@ -105,9 +125,10 @@ Bug 列表：
      ]
    }}
    targets 只能填 "app" 和/或 "backend"；platform 填 android、ios、both 或 unknown。
-   understanding 和 steps 每个 Bug 都必须写（包括 rejected 的）：它们会原样贴进禅道备注，
-   让测试同事一眼核对 AI 理解的和他报的是不是同一个问题。steps 写你实际用来定位/验证的
-   操作路径，不要照抄禅道原文，也不要写代码层面的调用链。
+   fixed 必须包含实际执行过的 verification.command 和 verification.passed=true；没有代码改动或测试未通过只能 rejected。
+   understanding 和 steps 每个 Bug 都必须写。只有代码、测试、提交和推送全部成功，外层服务才会把 fixed 的内容
+   写进禅道；rejected 和任何执行失败都只在本地记录。steps 写你实际用来定位/验证的操作路径，不要照抄禅道原文，
+   也不要写代码层面的调用链。
    列表里的每个 Bug 都必须在这个文件里有且只有一条记录。
 """
 
@@ -136,6 +157,13 @@ def read_triage_result(result_path: Path, expected_bug_ids: Sequence[int]) -> Di
         decision = str(entry.get("decision") or "").strip().lower()
         if decision not in {"fixed", "rejected"}:
             raise TriageResultError(f"Bug #{bug_id} has an unknown decision {entry.get('decision')!r}")
+        verification = entry.get("verification") if isinstance(entry.get("verification"), dict) else {}
+        verification_command = str(verification.get("command") or "").strip()
+        verification_passed = verification.get("passed") is True
+        if decision == "fixed" and (not verification_command or not verification_passed):
+            raise TriageResultError(
+                f"Bug #{bug_id} reported fixed without a synchronous passing verification command"
+            )
         verdicts[bug_id] = {
             "decision": decision,
             "targets": _normalized_targets(entry.get("targets")),
@@ -146,6 +174,8 @@ def read_triage_result(result_path: Path, expected_bug_ids: Sequence[int]) -> Di
             "solution": str(entry.get("solution") or "").strip(),
             "reason": str(entry.get("reason") or "").strip(),
             "missing": str(entry.get("missing") or "").strip(),
+            "verification_command": verification_command,
+            "verification_passed": verification_passed,
         }
     missing = [bug_id for bug_id in expected_bug_ids if bug_id not in verdicts]
     if missing:
@@ -238,20 +268,25 @@ def _run_agent(
             timed_out = True
             log_file.write(f"\n[agent_runner] {agent} timed out after {timeout_seconds}s; terminating process group.\n")
             log_file.flush()
-            _terminate_process_group(process)
+            process_groups = _descendant_process_groups(process.pid)
+            _terminate_process_groups(process, process_groups)
             try:
                 return_code = process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 log_file.write(f"[agent_runner] {agent} did not exit after SIGTERM; killing process group.\n")
                 log_file.flush()
-                _kill_process_group(process)
+                _kill_process_groups(process, process_groups)
                 return_code = process.wait(timeout=10)
         reader.join(timeout=10)
     output = "".join(output_tail)
     if timed_out:
         raise AgentError(f"{agent} timed out after {timeout_seconds}s:\n{output}")
     if return_code != 0:
+        if _agent_quota_exhausted(agent, output):
+            raise AgentQuotaError(f"{agent} quota exhausted:\n{output}")
         raise AgentError(f"{agent} failed with exit {return_code}:\n{output}")
+    if _agent_quota_exhausted(agent, output):
+        raise AgentQuotaError(f"{agent} quota exhausted:\n{output}")
     return output
 
 
@@ -260,6 +295,24 @@ def _agent_env(env_overrides: Optional[Dict[str, str]]) -> Dict[str, str]:
     if env_overrides:
         env.update(env_overrides)
     return env
+
+
+def _agent_quota_exhausted(agent: str, output: str) -> bool:
+    """Recognize Claude account exhaustion without treating transient or auth failures as quota."""
+    if agent != "claude":
+        return False
+    normalized = " ".join((output or "").casefold().split())
+    markers = (
+        "you've hit your limit",
+        "you have hit your limit",
+        "usage limit reached",
+        "usage limit has been reached",
+        "out of extra usage",
+        "insufficient credits",
+        "credit balance is too low",
+        "exceeded your current quota",
+    )
+    return any(marker in normalized for marker in markers)
 
 
 def _bug_log_label(bugs: Sequence[Tuple[int, str]]) -> str:
@@ -277,22 +330,57 @@ def _stream_output(stream, log_file, output_tail: List[str]) -> None:
             del output_tail[:-200]
 
 
-def _terminate_process_group(process: subprocess.Popen) -> None:
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    except (AttributeError, OSError):
-        process.terminate()
+def _descendant_process_groups(root_pid: int) -> List[int]:
+    """Detached Claude tool tasks have their own process groups; collect them before killing the root."""
+    result = subprocess.run(
+        ["ps", "-axo", "pid=,ppid=,pgid="],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if result.returncode != 0:
+        return [root_pid]
+    children: Dict[int, List[Tuple[int, int]]] = {}
+    for line in result.stdout.splitlines():
+        try:
+            pid, parent_pid, group_id = (int(value) for value in line.split())
+        except ValueError:
+            continue
+        children.setdefault(parent_pid, []).append((pid, group_id))
+    groups = set()
+    pending = [root_pid]
+    while pending:
+        parent_pid = pending.pop()
+        for pid, group_id in children.get(parent_pid, []):
+            pending.append(pid)
+            if group_id > 0:
+                groups.add(group_id)
+    groups.discard(root_pid)
+    return [*sorted(groups), root_pid]
 
 
-def _kill_process_group(process: subprocess.Popen) -> None:
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return
-    except (AttributeError, OSError):
-        process.kill()
+def _terminate_process_groups(process: subprocess.Popen, process_groups: List[int]) -> None:
+    _signal_process_groups(process, process_groups, signal.SIGTERM)
+
+
+def _kill_process_groups(process: subprocess.Popen, process_groups: List[int]) -> None:
+    _signal_process_groups(process, process_groups, signal.SIGKILL)
+
+
+def _signal_process_groups(
+    process: subprocess.Popen,
+    process_groups: List[int],
+    sig: signal.Signals,
+) -> None:
+    for group_id in process_groups:
+        try:
+            os.killpg(group_id, sig)
+        except ProcessLookupError:
+            continue
+        except (AttributeError, OSError):
+            if group_id == process.pid:
+                process.terminate() if sig == signal.SIGTERM else process.kill()
 
 
 class _NullWriter:

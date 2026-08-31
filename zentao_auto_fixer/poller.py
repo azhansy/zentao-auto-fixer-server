@@ -6,12 +6,15 @@ import time
 from typing import Any, Optional
 
 from .config import Settings
-from .models import AUTO_FIXED_STATUSES, BugCandidate, ProjectConfig, platforms_of
-
-
-# Outcomes that never resolve themselves: without this the bug would sit on the AI
-# account forever, unfixed and unreported.
-STUCK_STATUSES = {"sync_conflict", "writeback_failed"}
+from .models import (
+    AUTO_FIXED_STATUSES,
+    RETRYABLE_STATUSES,
+    TERMINAL_STATUSES,
+    BugCandidate,
+    ProjectConfig,
+    has_ui_tag,
+    platforms_of,
+)
 from .state import StateStore, utc_now
 from .worker import Worker
 from .zentao import ZenTaoPollError, bug_has_ai_comment, list_project_bugs
@@ -71,6 +74,8 @@ class Poller:
                 "ZenTao comments already carry the AI marker; not fixing again.",
             )
             LOGGER.info("Bug #%s already has an AI comment in ZenTao, skipping", bug.bug_id)
+        else:
+            self.state.mark_handled_in_zentao(bug.bug_id)
         return "handled"
 
     def _poll_project(self, project: ProjectConfig) -> None:
@@ -82,17 +87,30 @@ class Poller:
         skipped_existing = 0
         skipped_resolved = 0
         skipped_platform = 0
+        skipped_ui = 0
         marked_manual = 0
         requeued_failed = 0
         try:
             bugs = list_project_bugs(self.settings.zentao_client_script, project)
             total = len(bugs)
+            existing_runs = {bug.bug_id: self.state.get_run(bug.bug_id) for bug in bugs}
+            bugs.sort(
+                key=lambda bug: (
+                    existing_runs[bug.bug_id] is not None,
+                    bug.opened_at or "9999",
+                    bug.bug_id,
+                )
+            )
             for bug in bugs:
                 if bug.bug_id <= 0:
                     skipped_resolved += 1
                     continue
-                existing = self.state.get_run(bug.bug_id)
+                existing = existing_runs[bug.bug_id]
                 active = _is_active(bug)
+
+                if active and has_ui_tag(bug.title) and not project.process_ui_bugs:
+                    skipped_ui += 1
+                    continue
 
                 if active and project.skips_platforms(platforms_of(bug.title)):
                     skipped_platform += 1
@@ -102,45 +120,58 @@ class Poller:
                     skipped_resolved += 1
                     if existing and existing.status in AUTO_FIXED_STATUSES:
                         self.state.mark_seen_resolved_once(bug.bug_id, bug.status)
+                    elif existing and existing.status == "failed":
+                        message = f"ZenTao status is now {bug.status!r}; the failed task is no longer active."
+                        self.state.update_status(bug.bug_id, "skipped_stale", error=message, completed=True)
+                        self.state.record_run_event(bug.bug_id, "skipped_stale", message)
                     continue
 
                 unresolved_count += 1
                 candidate_count += 1
 
                 if existing:
-                    if existing.status in STUCK_STATUSES:
-                        self.state.mark_manual_required(
-                            bug.bug_id,
-                            f"Last automatic attempt ended as {existing.status}; a human has to take it from here.",
-                        )
-                        self.state.record_run_event(
-                            bug.bug_id,
-                            "stuck_marked_manual",
-                            f"{existing.status}: {existing.error[:200]}",
-                        )
-                        marked_manual += 1
+                    if existing.status == "queued":
+                        self.worker.enqueue(bug.bug_id)
+                        skipped_existing += 1
                         continue
-                    if self.state.should_mark_manual_required(bug.bug_id):
-                        reason = (
-                            f"AI already fixed this bug once (status={existing.status}, "
-                            f"commit={existing.commit_hash or 'n/a'}) and it is active again; "
-                            "verification did not pass, so it needs a human."
-                        )
-                        self.state.mark_manual_required(bug.bug_id, reason)
-                        self.state.record_run_event(bug.bug_id, "reopened_after_auto_fix", reason)
-                        marked_manual += 1
-                    elif existing.status == "failed" and self.settings.retry_failed:
+                    if existing.status in {"running", "writeback_queued"}:
+                        skipped_existing += 1
+                        continue
+                    if existing.status == "skipped_ui" and project.process_ui_bugs:
+                        if queued >= project.max_bugs_per_poll:
+                            skipped_existing += 1
+                        elif self.state.requeue_skipped_ui(bug, project):
+                            self.worker.enqueue(bug.bug_id)
+                            queued += 1
+                        else:
+                            skipped_existing += 1
+                        continue
+                    if existing.status == "writeback_failed":
+                        zentao_state = self._already_handled_in_zentao(bug, project)
+                        if zentao_state == "fresh" and self.state.queue_writeback_retry(bug.bug_id):
+                            self.worker.enqueue(bug.bug_id)
+                            queued += 1
+                        else:
+                            skipped_existing += 1
+                        continue
+                    if existing.status in RETRYABLE_STATUSES:
+                        if queued >= project.max_bugs_per_poll:
+                            skipped_existing += 1
+                            continue
                         if self._already_handled_in_zentao(bug, project) != "fresh":
                             skipped_existing += 1
                             continue
-                        if self.state.requeue_failed(bug, project):
+                        if self.state.requeue_retryable(bug, project):
                             self.worker.enqueue(bug.bug_id)
                             queued += 1
                             requeued_failed += 1
                         else:
                             skipped_existing += 1
-                    else:
+                        continue
+                    if existing.status in TERMINAL_STATUSES:
                         skipped_existing += 1
+                        continue
+                    skipped_existing += 1
                     continue
 
                 if queued >= project.max_bugs_per_poll:
@@ -173,12 +204,13 @@ class Poller:
                 candidate_bugs=candidate_count,
                 queued_bugs=queued,
                 skipped_existing=skipped_existing,
-                skipped_resolved=skipped_resolved + skipped_platform,
+                skipped_resolved=skipped_resolved + skipped_platform + skipped_ui,
                 marked_manual=marked_manual,
                 requeued_failed=requeued_failed,
             )
             LOGGER.info(
-                "Polled %s: total=%s unresolved=%s queued=%s existing=%s resolved=%s manual=%s platform_skipped=%s",
+                "Polled %s: total=%s unresolved=%s queued=%s existing=%s resolved=%s manual=%s "
+                "platform_skipped=%s ui_skipped=%s",
                 project.name,
                 total,
                 unresolved_count,
@@ -187,6 +219,7 @@ class Poller:
                 skipped_resolved,
                 marked_manual,
                 skipped_platform,
+                skipped_ui,
             )
         except Exception as exc:
             self.state.record_poll_run(
@@ -199,7 +232,7 @@ class Poller:
                 candidate_bugs=candidate_count,
                 queued_bugs=queued,
                 skipped_existing=skipped_existing,
-                skipped_resolved=skipped_resolved + skipped_platform,
+                skipped_resolved=skipped_resolved + skipped_platform + skipped_ui,
                 marked_manual=marked_manual,
                 requeued_failed=requeued_failed,
                 error=str(exc),

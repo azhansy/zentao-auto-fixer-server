@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import queue
 import threading
 import time
-import traceback
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .agent_runner import AgentError, TriageResultError, run_agent_batch_fix
+from .agent_runner import AgentError, AgentQuotaError, TriageResultError, run_agent_batch_fix
 from .config import Settings
 from .git_ops import (
     GitError,
@@ -18,6 +18,7 @@ from .git_ops import (
     commit_all,
     create_detached_worktree,
     ensure_repo_cache,
+    export_patch,
     has_changes,
     head_commit,
     push_head_dry_run,
@@ -26,13 +27,12 @@ from .git_ops import (
     repo_cache_name,
     reset_hard_clean,
 )
-from .models import ProjectConfig, RunRecord, platforms_of
+from .models import ProjectConfig, RunRecord, has_ui_tag, platforms_of
 from .state import StateStore
 from .zentao import (
     ZenTaoPollError,
     ZenTaoResolveError,
     ZenTaoWriteError,
-    assign_bug,
     bug_is_still_actionable,
     bug_view_url,
     comment_bug,
@@ -48,6 +48,8 @@ class Worker:
         self.settings = settings
         self.state = state
         self.queue: "queue.Queue[int]" = queue.Queue()
+        self._queued_ids = set()
+        self._queue_guard = threading.Lock()
         self._threads: List[threading.Thread] = []
         self._stop = threading.Event()
         self._repo_locks: Dict[str, threading.Lock] = {}
@@ -74,6 +76,10 @@ class Worker:
             thread.join(timeout=5)
 
     def enqueue(self, bug_id: int) -> None:
+        with self._queue_guard:
+            if bug_id in self._queued_ids:
+                return
+            self._queued_ids.add(bug_id)
         self.queue.put(bug_id)
         LOGGER.info("Queued bug #%s for repair", bug_id)
 
@@ -85,26 +91,51 @@ class Worker:
             try:
                 self._process_bug(bug_id)
             except Exception as exc:
-                error = f"{exc}\n{traceback.format_exc()}"
-                if _still_running(self.state, bug_id) or _is_queued(self.state, bug_id):
-                    self.state.update_status(bug_id, "failed", error=error, completed=True)
-                self.state.record_run_event(bug_id, "failed", str(exc))
-                LOGGER.error("Worker failed bug #%s: %s", bug_id, exc)
+                run = self.state.get_run(bug_id)
+                if run and (run.status == "running" or run.status == "queued"):
+                    self._fail_batch([run], "failed", str(exc), "")
+                LOGGER.exception("Worker failed bug #%s", bug_id)
             finally:
+                with self._queue_guard:
+                    self._queued_ids.discard(bug_id)
                 self.queue.task_done()
 
     def _process_bug(self, bug_id: int) -> None:
         run = self.state.get_run(bug_id)
-        if not run or run.status != "queued":
+        if not run:
+            return
+        if run.status == "writeback_queued":
+            self._retry_writeback(run)
+            return
+        if run.status != "queued":
             return
         config_error = self.settings.validate_for_worker()
         if config_error:
-            self.state.update_status(bug_id, "failed", error=config_error, completed=True)
-            self.state.record_run_event(bug_id, "failed", config_error)
+            self._fail_batch([run], "failed", config_error, "")
             LOGGER.error("Worker cannot start bug #%s: %s", bug_id, config_error)
             return
 
-        stale = self._stale_reason(bug_id)
+        project = self._project_for(run)
+        if project is None:
+            message = f"Project {run.project_name!r} is missing from the project config; not guessing its repos."
+            self._fail_batch([run], "failed", message, "")
+            LOGGER.error("Worker cannot start bug #%s: %s", bug_id, message)
+            return
+
+        if has_ui_tag(run.title) and not project.process_ui_bugs:
+            message = "标题带有 UI 标签，当前项目 processUiBugs=false，未调用 AI。"
+            self.state.update_status(
+                bug_id,
+                "skipped_ui",
+                error=message,
+                handled_once=False,
+                completed=True,
+            )
+            self.state.record_run_event(bug_id, "skipped_ui", message)
+            LOGGER.info("Bug #%s skipped because its title carries a UI tag", bug_id)
+            return
+
+        stale = self._stale_reason(run)
         if stale:
             self.state.update_status(bug_id, "skipped_stale", error=stale, completed=True)
             self.state.record_run_event(bug_id, "skipped_stale", stale)
@@ -116,27 +147,6 @@ class Worker:
             self._reject_multi_platform(run, titled_platforms)
             return
 
-        if not self._claim_agent_budget():
-            self.state.record_run_event(
-                bug_id,
-                "agent_budget_exhausted",
-                f"Hit the {self.settings.max_agent_runs_per_day} agent runs/day ceiling; "
-                "staying queued until tomorrow or a restart.",
-            )
-            LOGGER.warning(
-                "Bug #%s stays queued: already used today's %s agent runs",
-                bug_id,
-                self.settings.max_agent_runs_per_day,
-            )
-            return
-
-        project = self._project_for(run)
-        if project is None:
-            message = f"Project {run.project_name!r} is missing from the project config; not guessing its repos."
-            self.state.update_status(bug_id, "failed", error=message, completed=True)
-            self.state.record_run_event(bug_id, "failed", message)
-            LOGGER.error("Worker cannot start bug #%s: %s", bug_id, message)
-            return
         repo_urls = [run.repo_url]
         if project.has_backend_repo:
             repo_urls.append(project.backend_repo_url)
@@ -145,6 +155,18 @@ class Worker:
             # Sorted so two workers touching the same pair of repos cannot deadlock on each other.
             for repo_url in sorted(set(repo_urls)):
                 stack.enter_context(self._lock_for_repo(repo_url))
+            latest = self.state.get_run(bug_id)
+            if not latest or latest.status != "queued":
+                return
+            if not self._claim_agent_budget():
+                reason = self._agent_budget_block_reason()
+                self.state.record_run_event(
+                    bug_id,
+                    "agent_budget_exhausted",
+                    reason,
+                )
+                LOGGER.warning("Bug #%s stays queued: %s", bug_id, reason)
+                return
             self._process_batch_with_repo_lock(bug_id, project)
 
     def _reject_multi_platform(self, run: RunRecord, platforms: tuple) -> None:
@@ -152,7 +174,7 @@ class Worker:
         named = "、".join(platforms)
         self.state.record_run_event(run.bug_id, "multi_platform", named)
         LOGGER.info("Bug #%s names several platforms (%s), handing it back", run.bug_id, named)
-        self._reject_to_reporter(
+        self._record_unable_to_fix(
             run,
             {
                 "understanding": f"这条 Bug 的标题同时标注了 {named} 多个端。",
@@ -162,30 +184,52 @@ class Worker:
             },
         )
 
-    def _stale_reason(self, bug_id: int) -> str:
+    def _stale_reason(self, run: RunRecord) -> str:
         """A queued bug can sit for hours or survive a restart; re-check ZenTao before spending an agent run."""
         try:
-            actionable, reason = bug_is_still_actionable(self.settings.zentao_client_script, bug_id)
+            actionable, reason = bug_is_still_actionable(
+                self.settings.zentao_client_script,
+                run.bug_id,
+                ignore_ai_comment=run.event_action == "manual_retry",
+            )
         except ZenTaoPollError as exc:
-            LOGGER.warning("Could not re-check bug #%s before fixing it: %s", bug_id, exc)
+            LOGGER.warning("Could not re-check bug #%s before fixing it: %s", run.bug_id, exc)
             return f"Could not confirm the bug is still active: {exc}"
         return "" if actionable else reason
 
     def _claim_agent_budget(self) -> bool:
         """One batch costs one agent run. The ceiling is the backstop against a runaway poll loop."""
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = datetime.now().astimezone().date().isoformat()
+        if self.state.daily_counter_value("consecutive_no_progress", today) >= 3:
+            return False
+        claimed = self.state.claim_daily_counter(
+            "agent_runs",
+            today,
+            self.settings.max_agent_runs_per_day,
+        )
+        current = self.state.daily_counter_value("agent_runs", today)
         with self._budget_guard:
-            if self._agent_runs_day != today:
-                self._agent_runs_day = today
-                self._agent_runs_today = 0
-            if self._agent_runs_today >= self.settings.max_agent_runs_per_day:
-                return False
-            self._agent_runs_today += 1
-            return True
+            self._agent_runs_day = today
+            self._agent_runs_today = current
+        return claimed
+
+    def _agent_budget_block_reason(self) -> str:
+        today = datetime.now().astimezone().date().isoformat()
+        if self.state.daily_counter_value("consecutive_no_progress", today) >= 3:
+            return "Three consecutive AI runs produced no pushed fix; paused until tomorrow."
+        return f"Hit the persisted {self.settings.max_agent_runs_per_day} agent runs/day ceiling; paused until tomorrow."
+
+    def _record_no_progress(self) -> None:
+        today = datetime.now().astimezone().date().isoformat()
+        self.state.increment_daily_counter("consecutive_no_progress", today)
+
+    def _record_progress(self) -> None:
+        today = datetime.now().astimezone().date().isoformat()
+        self.state.set_daily_counter("consecutive_no_progress", today, 0)
 
     def agent_runs_today(self) -> int:
-        with self._budget_guard:
-            return self._agent_runs_today
+        today = datetime.now().astimezone().date().isoformat()
+        return self.state.daily_counter_value("agent_runs", today)
 
     def _project_for(self, run: RunRecord) -> Optional[ProjectConfig]:
         try:
@@ -201,6 +245,20 @@ class Worker:
 
     def _process_batch_with_repo_lock(self, leader_bug_id: int, project: ProjectConfig) -> None:
         batch = self.state.claim_queued_batch(leader_bug_id, limit=project.max_bugs_per_poll)
+        if not batch:
+            return
+        skipped_ui = [run for run in batch if has_ui_tag(run.title) and not project.process_ui_bugs]
+        for run in skipped_ui:
+            message = "标题带有 UI 标签，当前项目 processUiBugs=false，未调用 AI。"
+            self.state.update_status(
+                run.bug_id,
+                "skipped_ui",
+                error=message,
+                handled_once=False,
+                completed=True,
+            )
+            self.state.record_run_event(run.bug_id, "skipped_ui", message)
+        batch = [run for run in batch if run not in skipped_ui]
         if not batch:
             return
         first = batch[0]
@@ -231,7 +289,15 @@ class Worker:
             agent_log = self.settings.logs_dir / f"batch-{bug_ids[0]}-{bug_ids[-1]}-agent.log"
             agent = project.agent
             self.state.record_run_events(bug_ids, "agent_start", f"{agent} log={agent_log}")
-            verdicts = self._run_agent_batch_with_retries(batch, agent, checkouts, result_path, agent_log)
+            verdicts = self._run_agent_batch_with_retries(
+                batch,
+                agent,
+                checkouts,
+                result_path,
+                agent_log,
+                fallback_agent=project.fallback_agent,
+                allow_full_xcodebuild=project.allow_full_xcodebuild,
+            )
             self.state.record_run_events(bug_ids, "agent_done", str(checkouts["app"].worktree))
 
             for run in batch:
@@ -255,17 +321,16 @@ class Worker:
             rejected = [run for run in remaining if verdicts[run.bug_id]["decision"] == "rejected"]
             fixed = [run for run in remaining if verdicts[run.bug_id]["decision"] == "fixed"]
             for run in rejected:
-                self._reject_to_reporter(run, verdicts[run.bug_id])
+                self._record_unable_to_fix(run, verdicts[run.bug_id])
             if not fixed:
+                self._record_no_progress()
                 LOGGER.info("Worker finished batch %s with nothing to commit", batch_label)
                 return
             self._commit_push_and_resolve(fixed, checkouts, verdicts, batch_label)
         except Exception as exc:
-            error = f"{exc}\n{traceback.format_exc()}"
-            unfinished = [run.bug_id for run in batch if _still_running(self.state, run.bug_id)]
-            self.state.update_statuses(unfinished, "failed", error=error, handled_once=True, completed=True)
-            self.state.record_run_events(unfinished, "failed", str(exc))
-            LOGGER.error("Worker failed batch %s: %s", batch_label, exc)
+            unfinished = [run for run in batch if _still_running(self.state, run.bug_id)]
+            self._fail_batch(unfinished, "failed", str(exc), "", count_no_progress=True)
+            LOGGER.exception("Worker failed batch %s", batch_label)
         finally:
             for checkout in checkouts.values():
                 try:
@@ -329,6 +394,8 @@ class Worker:
         checkouts: Dict[str, "_Checkout"],
         result_path: Path,
         agent_log: Path,
+        fallback_agent: str = "",
+        allow_full_xcodebuild: bool = False,
     ) -> Dict[int, Dict[str, Any]]:
         last_error: Optional[Exception] = None
         bug_ids = [run.bug_id for run in batch]
@@ -355,6 +422,40 @@ class Worker:
                     result_path,
                     agent_log,
                     timeout_seconds=self.settings.codex_timeout_seconds,
+                    allow_full_xcodebuild=allow_full_xcodebuild,
+                )
+            except AgentQuotaError as exc:
+                last_error = exc
+                self.state.record_run_events(
+                    bug_ids,
+                    "agent_attempt_failed",
+                    f"{agent} {attempt}/{self.settings.codex_attempts}: {exc}",
+                )
+                if not fallback_agent:
+                    break
+                if not self._claim_agent_budget():
+                    self.state.record_run_events(
+                        bug_ids,
+                        "agent_fallback_budget_exhausted",
+                        f"Claude quota exhausted, but today's {self.settings.max_agent_runs_per_day} "
+                        "agent starts are already used.",
+                    )
+                    raise AgentError("Claude quota exhausted and no daily agent budget remains for fallback") from exc
+                for checkout in checkouts.values():
+                    reset_hard_clean(checkout.worktree, checkout.baseline)
+                self.state.record_run_events(bug_ids, "worktrees_reset", "discarded the exhausted agent attempt")
+                self.state.record_run_events(
+                    bug_ids,
+                    "agent_fallback",
+                    f"{agent} quota exhausted; switching to {fallback_agent}",
+                )
+                return self._run_agent_batch_with_retries(
+                    batch,
+                    fallback_agent,
+                    checkouts,
+                    result_path,
+                    agent_log,
+                    allow_full_xcodebuild=allow_full_xcodebuild,
                 )
             except (AgentError, TriageResultError) as exc:
                 last_error = exc
@@ -368,77 +469,54 @@ class Worker:
         assert last_error is not None
         raise last_error
 
-    def _reject_to_reporter(self, run: RunRecord, verdict: Dict[str, Any]) -> None:
-        """Hand a bug we could not diagnose back to whoever opened it, leaving it active."""
+    def _record_unable_to_fix(self, run: RunRecord, verdict: Dict[str, Any]) -> None:
+        """Remember an unfixable result locally; unsuccessful runs never mutate ZenTao."""
         reason = verdict.get("reason") or "AI 无法从当前 Bug 描述定位到问题。"
         missing = verdict.get("missing") or "请补充复现步骤、测试账号、出现时间和截图或日志。"
-        self.state.record_run_event(run.bug_id, "reject_start", reason)
-        try:
-            comment_bug(
-                self.settings.zentao_client_script,
-                run.bug_id,
-                cause=_cause_text(verdict, "无法定位的原因", reason),
-                solution=f"请补充以下信息后重新指派给开发：{missing}",
-            )
-            self.state.record_run_event(run.bug_id, "reject_comment_done", missing)
-        except Exception as exc:
-            error = str(exc)
-            self.state.record_run_event(run.bug_id, "reject_comment_failed", error)
-            LOGGER.error("Could not comment the hand-back of bug #%s: %s", run.bug_id, error)
-            self.state.update_status(run.bug_id, "failed", error=error, handled_once=True, completed=True)
-            return
+        detail = f"{reason} 需要补充：{missing}"
+        self.state.mark_unable_to_fix(run.bug_id, detail)
+        self.state.record_run_event(run.bug_id, "unable_to_fix", detail)
 
-        # The note is what the reporter actually reads; a failed re-assign only means it
-        # stays on the AI account, so keep the hand-back and flag the assign separately.
-        assign_error = ""
+    def _save_conflict_patch(self, checkout: "_Checkout", batch_label: str) -> str:
+        """Push failed; save the agent's actual diff so a human doesn't have to re-diagnose from scratch."""
+        if not checkout.has_work():
+            return ""
         try:
-            assign_bug(run.bug_id, run.opened_by)
-            self.state.record_run_event(run.bug_id, "reject_assigned", run.opened_by)
-        except Exception as exc:
-            assign_error = str(exc)
-            self.state.record_run_event(run.bug_id, "reject_assign_failed", assign_error)
-            LOGGER.error("Commented bug #%s but could not assign it to %s: %s", run.bug_id, run.opened_by, assign_error)
-        self.state.update_status(
-            run.bug_id,
-            "rejected_to_reporter",
-            error=f"指派回 {run.opened_by} 失败，Bug 仍挂在 AI 账号上：{assign_error}" if assign_error else "",
-            handled_once=True,
-            completed=True,
-        )
+            patch = export_patch(checkout.worktree, checkout.baseline)
+        except GitError:
+            LOGGER.exception("Could not export patch for %s repo=%s", batch_label, checkout.kind)
+            return ""
+        if not patch.strip():
+            return ""
+        patches_dir = self.settings.data_dir / "patches"
+        patches_dir.mkdir(parents=True, exist_ok=True)
+        safe_label = batch_label.replace("#", "").replace(" ", "-")
+        path = patches_dir / f"{safe_label}-{checkout.kind}-{checkout.baseline[:8]}.patch"
+        path.write_text(patch, encoding="utf-8")
+        return str(path)
 
-    def _fail_batch_and_notify(
+    def _fail_batch(
         self,
         batch: List[RunRecord],
         status: str,
         detail: str,
         commit_hash: str,
+        *,
+        count_no_progress: bool = False,
     ) -> None:
-        """Failures must not go quiet: say so on the bug and get it off the AI account."""
+        """Keep service failures out of ZenTao; health and local events expose them."""
         for run in batch:
-            note_error = ""
-            try:
-                comment_bug(
-                    self.settings.zentao_client_script,
-                    run.bug_id,
-                    cause=f"AI 自动修复未能完成（{status}）：{detail}",
-                    solution="这条 Bug 需要人工接手，AI 不会再自动处理。",
-                )
-                self.state.record_run_event(run.bug_id, "failure_comment_done", status)
-                if run.opened_by:
-                    assign_bug(run.bug_id, run.opened_by)
-                    self.state.record_run_event(run.bug_id, "failure_assigned", run.opened_by)
-            except Exception as exc:
-                note_error = str(exc)
-                self.state.record_run_event(run.bug_id, "failure_notify_failed", note_error)
-                LOGGER.error("Could not report the failure of bug #%s to ZenTao: %s", run.bug_id, exc)
             self.state.update_status(
                 run.bug_id,
                 status,
-                error=f"{detail}{'; 禅道回写失败: ' + note_error if note_error else ''}",
+                error=detail,
                 commit_hash=commit_hash,
                 handled_once=True,
                 completed=True,
             )
+            self.state.record_run_event(run.bug_id, status, detail)
+        if batch and count_no_progress:
+            self._record_no_progress()
 
     def _commit_push_and_resolve(
         self,
@@ -460,14 +538,11 @@ class Worker:
                     "The agent committed on its own; pushing its commits instead of dropping them.",
                 )
         if not changed:
-            self.state.update_statuses(
-                bug_ids,
-                "no_changes",
-                error="The agent reported fixes but no git changes were produced",
-                handled_once=True,
-                completed=True,
-            )
-            self.state.record_run_events(bug_ids, "no_changes", "The agent reported fixes but no git changes were produced")
+            detail = "The agent reported a fix but produced no code changes; kept local without ZenTao writeback."
+            for run in fixed:
+                self.state.mark_unable_to_fix(run.bug_id, detail)
+            self.state.record_run_events(bug_ids, "unable_to_fix", detail)
+            self._record_no_progress()
             LOGGER.info("Worker finished batch %s with no changes", batch_label)
             return
 
@@ -495,7 +570,11 @@ class Worker:
                 push_head_dry_run(checkout.worktree, checkout.target_branch)
             except GitError as exc:
                 status = "sync_conflict" if _looks_like_non_fast_forward(str(exc)) else "failed"
-                self._fail_batch_and_notify(fixed, status, f"{checkout.kind} push check: {exc}", "")
+                patch_path = self._save_conflict_patch(checkout, batch_label)
+                detail = f"{checkout.kind} push check: {exc}"
+                if patch_path:
+                    detail += f"\nAI 这次的改动已经存成补丁，人工接手时可以直接用：{patch_path}"
+                self._fail_batch(fixed, status, detail, "", count_no_progress=True)
                 LOGGER.error("Worker push check failed batch %s repo=%s: %s", batch_label, checkout.kind, exc)
                 return
 
@@ -512,7 +591,10 @@ class Worker:
                         f"仓库 {'、'.join(pushed)} 的修复已经推送（{' '.join(commits)}），"
                         f"但 {checkout.kind} 推送失败，修复只落地了一半，需要人工处理：{exc}"
                     )
-                self._fail_batch_and_notify(fixed, status, detail, " ".join(commits))
+                patch_path = self._save_conflict_patch(checkout, batch_label)
+                if patch_path:
+                    detail += f"\nAI 这次的改动已经存成补丁，人工接手时可以直接用：{patch_path}"
+                self._fail_batch(fixed, status, detail, " ".join(commits), count_no_progress=True)
                 LOGGER.error(
                     "Worker push failed batch %s repo=%s status=%s (already pushed: %s): %s",
                     batch_label,
@@ -526,6 +608,7 @@ class Worker:
             self.state.record_run_events(bug_ids, f"pushed_{checkout.kind}", checkout.target_branch)
 
         commit_summary = " ".join(commits)
+        self._record_progress()
         self._comment_and_resolve(fixed, verdicts, commit_summary)
         urls = ", ".join(bug_view_url(run.bug_id) for run in fixed)
         LOGGER.info("Worker pushed batch %s commits=%s urls=%s", batch_label, commit_summary, urls)
@@ -538,35 +621,65 @@ class Worker:
     ) -> None:
         for run in fixed:
             verdict = verdicts[run.bug_id]
-            error = ""
-            self.state.record_run_event(run.bug_id, "comment_start", commit_summary)
-            try:
-                comment_bug(
-                    self.settings.zentao_client_script,
-                    run.bug_id,
-                    cause=_cause_text(verdict, "原因分析", verdict.get("cause") or "见提交记录。"),
-                    solution=_solution_text(verdict, commit_summary),
-                )
-                self.state.record_run_event(run.bug_id, "comment_done", "")
-            except ZenTaoWriteError as exc:
-                error = str(exc)
-                self.state.record_run_event(run.bug_id, "comment_failed", error)
-                LOGGER.error("Comment failed bug #%s after batch push: %s", run.bug_id, exc)
-            try:
-                resolve_bug(self.settings.zentao_client_script, run.bug_id)
-                self.state.record_run_event(run.bug_id, "resolve_done", "resolved/fixed")
-            except ZenTaoResolveError as exc:
-                error = f"{error}; {exc}".strip("; ")
-                self.state.record_run_event(run.bug_id, "resolve_failed", str(exc))
-                LOGGER.error("Resolve failed bug #%s after batch push: %s", run.bug_id, exc)
+            payload = {
+                "cause": _cause_text(verdict, "原因分析", verdict.get("cause") or "见提交记录。"),
+                "solution": _solution_text(verdict, commit_summary),
+                "commit_summary": commit_summary,
+            }
+            self.state.set_writeback_payload(run.bug_id, json.dumps(payload, ensure_ascii=False))
+            self._writeback_one(run, payload)
+
+    def _retry_writeback(self, run: RunRecord) -> None:
+        try:
+            payload = json.loads(run.writeback_payload)
+        except (TypeError, json.JSONDecodeError) as exc:
+            detail = f"Invalid stored writeback payload: {exc}"
+            self.state.update_status(run.bug_id, "writeback_exhausted", error=detail, completed=True)
+            self.state.record_run_event(run.bug_id, "writeback_exhausted", detail)
+            return
+        self._writeback_one(run, payload)
+
+    def _writeback_one(self, run: RunRecord, payload: Dict[str, str]) -> None:
+        commit_summary = payload.get("commit_summary") or run.commit_hash
+        self.state.record_run_event(run.bug_id, "comment_start", commit_summary)
+        try:
+            comment_bug(
+                self.settings.zentao_client_script,
+                run.bug_id,
+                cause=payload["cause"],
+                solution=payload["solution"],
+            )
+            self.state.record_run_event(run.bug_id, "comment_done", "")
+        except (KeyError, ZenTaoWriteError) as exc:
+            error = str(exc)
+            self.state.record_run_event(run.bug_id, "comment_failed", error)
             self.state.update_status(
                 run.bug_id,
-                "pushed" if not error else "writeback_failed",
+                "writeback_failed",
                 error=error,
                 commit_hash=commit_summary,
                 handled_once=True,
                 completed=True,
             )
+            LOGGER.error("Comment failed bug #%s after push: %s", run.bug_id, exc)
+            return
+
+        error = ""
+        try:
+            resolve_bug(self.settings.zentao_client_script, run.bug_id)
+            self.state.record_run_event(run.bug_id, "resolve_done", "resolved/fixed")
+        except ZenTaoResolveError as exc:
+            error = str(exc)
+            self.state.record_run_event(run.bug_id, "resolve_failed", error)
+            LOGGER.error("Resolve failed bug #%s after push: %s", run.bug_id, exc)
+        self.state.update_status(
+            run.bug_id,
+            "pushed" if not error else "writeback_failed",
+            error=error,
+            commit_hash=commit_summary,
+            handled_once=True,
+            completed=True,
+        )
 
 
 class _Checkout:
@@ -616,6 +729,8 @@ def _solution_text(verdict: Dict[str, Any], commit_summary: str) -> str:
     platform = verdict.get("platform")
     if platform and platform != "unknown":
         parts.append(f"复现端：{platform}")
+    if verdict.get("verification_passed") and verdict.get("verification_command"):
+        parts.append(f"测试：{verdict['verification_command']}")
     parts.append(f"提交：{commit_summary}")
     return "\n".join(parts)
 

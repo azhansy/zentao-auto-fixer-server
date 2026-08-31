@@ -97,13 +97,18 @@ def _has_ai_marker(detail: Dict[str, Any]) -> bool:
     )
 
 
-def bug_is_still_actionable(client_script: Path, bug_id: int) -> Tuple[bool, str]:
+def bug_is_still_actionable(
+    client_script: Path,
+    bug_id: int,
+    *,
+    ignore_ai_comment: bool = False,
+) -> Tuple[bool, str]:
     """Re-read a bug right before fixing it: queued work can be hours or a restart old."""
     detail = _bug_detail(client_script, bug_id)
     status = str(detail.get("status") or "").strip().lower()
     if status != "active":
         return False, f"ZenTao status is now {status or 'unknown'!r}, not active"
-    if _has_ai_marker(detail):
+    if not ignore_ai_comment and _has_ai_marker(detail):
         return False, "ZenTao already carries an AI comment for this bug"
     return True, ""
 
@@ -185,7 +190,15 @@ def _verify_assignee(bug_id: int, account: str, token: str, base_url: str, api_p
 
 
 def _list_project_bugs_with_helper(client_script: Path, project: ProjectConfig) -> List[BugCandidate]:
-    cmd = ["python3", str(client_script), "bugs", str(project.zentao_product_id), "--all"]
+    cmd = [
+        "python3",
+        str(client_script),
+        "bugs",
+        str(project.zentao_product_id),
+        "--all",
+        "--limit",
+        os.getenv("AUTO_FIXER_ZENTAO_PAGE_LIMIT", "200"),
+    ]
     if not project.only_code_bugs:
         cmd.append("--include-non-code")
     result = subprocess.run(
@@ -242,7 +255,7 @@ def _filter_and_sort_candidates(
             for bug in result
             if bug.assigned_to == project.zentao_assigned_to
         ]
-    return sorted(result, key=lambda bug: (bug.priority or 99, bug.severity or 99, bug.bug_id))
+    return sorted(result, key=lambda bug: (bug.opened_at or "9999", bug.bug_id))
 
 
 def _curl_login() -> str:
@@ -311,6 +324,12 @@ def _candidate_from_bug(product_id: int, bug: Dict[str, Any]) -> BugCandidate:
         severity=_int_value(bug.get("severity"), 99),
         priority=_int_value(bug.get("pri") or bug.get("priority"), 99),
         raw=bug,
+        opened_at=_text_value(
+            bug.get("openedDate")
+            or bug.get("opened_date")
+            or bug.get("openedAt")
+            or bug.get("opened_at")
+        ),
     )
 
 

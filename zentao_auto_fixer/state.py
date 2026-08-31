@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .models import AUTO_FIXED_STATUSES, BugCandidate, ProjectConfig, RunRecord
+from .models import RETRYABLE_STATUSES, BugCandidate, ProjectConfig, RunRecord
 from .zentao import bug_view_url
 
 
@@ -43,7 +43,10 @@ class StateStore:
                     repo_url TEXT NOT NULL DEFAULT '',
                     target_branch TEXT NOT NULL DEFAULT '',
                     opened_by TEXT NOT NULL DEFAULT '',
+                    opened_at TEXT NOT NULL DEFAULT '',
                     triage_targets TEXT NOT NULL DEFAULT '',
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    writeback_payload TEXT NOT NULL DEFAULT '',
                     commit_hash TEXT NOT NULL DEFAULT '',
                     error TEXT NOT NULL DEFAULT '',
                     handled_once INTEGER NOT NULL DEFAULT 0,
@@ -91,6 +94,16 @@ class StateStore:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_run_events_bug ON run_events(bug_id, id)")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daily_counters (
+                    counter_name TEXT NOT NULL,
+                    day TEXT NOT NULL,
+                    value INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (counter_name, day)
+                )
+                """
+            )
 
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute("PRAGMA table_info(bug_runs)").fetchall()
@@ -102,7 +115,10 @@ class StateStore:
             "commit_hash": "TEXT NOT NULL DEFAULT ''",
             "seen_resolved_once": "INTEGER NOT NULL DEFAULT 0",
             "opened_by": "TEXT NOT NULL DEFAULT ''",
+            "opened_at": "TEXT NOT NULL DEFAULT ''",
             "triage_targets": "TEXT NOT NULL DEFAULT ''",
+            "retry_count": "INTEGER NOT NULL DEFAULT 0",
+            "writeback_payload": "TEXT NOT NULL DEFAULT ''",
         }
         for name, definition in additions.items():
             if name not in existing:
@@ -117,9 +133,9 @@ class StateStore:
                     INSERT INTO bug_runs (
                         bug_id, title, status, project_name, event_action, product_id,
                         assigned_to, bug_type, bug_status, repo_url, target_branch,
-                        opened_by, first_seen_at, updated_at
+                        opened_by, opened_at, first_seen_at, updated_at
                     )
-                    VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         bug.bug_id,
@@ -133,6 +149,7 @@ class StateStore:
                         project.repo_url,
                         project.target_branch,
                         bug.opened_by,
+                        bug.opened_at,
                         now,
                         now,
                     ),
@@ -141,19 +158,32 @@ class StateStore:
                 return False
             return True
 
-    def requeue_failed(self, bug: BugCandidate, project: ProjectConfig) -> bool:
+    def requeue_retryable(self, bug: BugCandidate, project: ProjectConfig, max_retries: int = 1) -> bool:
         now = utc_now()
         with self._lock, self._connect() as conn:
-            row = conn.execute("SELECT status FROM bug_runs WHERE bug_id = ?", (bug.bug_id,)).fetchone()
-            if not row or row["status"] != "failed":
+            row = conn.execute(
+                "SELECT status, retry_count FROM bug_runs WHERE bug_id = ?", (bug.bug_id,)
+            ).fetchone()
+            if not row or row["status"] not in RETRYABLE_STATUSES:
+                return False
+            if int(row["retry_count"]) >= max_retries:
+                conn.execute(
+                    """
+                    UPDATE bug_runs
+                    SET status = 'retry_exhausted', error = ?, updated_at = ?, completed_at = ?
+                    WHERE bug_id = ?
+                    """,
+                    ("Automatic retry limit reached; kept local without ZenTao writeback.", now, now, bug.bug_id),
+                )
                 return False
             conn.execute(
                 """
                 UPDATE bug_runs
                 SET title = ?, status = 'queued', project_name = ?, product_id = ?,
                     assigned_to = ?, bug_type = ?, bug_status = ?, repo_url = ?,
-                    target_branch = ?, opened_by = ?, error = '', updated_at = ?,
-                    completed_at = NULL
+                    target_branch = ?, opened_by = ?, opened_at = ?, error = '',
+                    retry_count = retry_count + 1, event_action = 'automatic_retry',
+                    updated_at = ?, completed_at = NULL
                 WHERE bug_id = ?
                 """,
                 (
@@ -166,6 +196,102 @@ class StateStore:
                     project.repo_url,
                     project.target_branch,
                     bug.opened_by,
+                    bug.opened_at,
+                    now,
+                    bug.bug_id,
+                ),
+            )
+            return True
+
+    def requeue_skipped_ui(self, bug: BugCandidate, project: ProjectConfig) -> bool:
+        """Requeue a UI-tagged bug after processUiBugs is explicitly enabled."""
+        now = utc_now()
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT status FROM bug_runs WHERE bug_id = ?", (bug.bug_id,)).fetchone()
+            if not row or row["status"] != "skipped_ui":
+                return False
+            conn.execute(
+                """
+                UPDATE bug_runs
+                SET title = ?, status = 'queued', project_name = ?, product_id = ?,
+                    assigned_to = ?, bug_type = ?, bug_status = ?, repo_url = ?,
+                    target_branch = ?, opened_by = ?, opened_at = ?, error = '', handled_once = 0,
+                    updated_at = ?, completed_at = NULL
+                WHERE bug_id = ?
+                """,
+                (
+                    bug.title,
+                    project.name,
+                    bug.product_id,
+                    bug.assigned_to,
+                    bug.bug_type,
+                    bug.status,
+                    project.repo_url,
+                    project.target_branch,
+                    bug.opened_by,
+                    bug.opened_at,
+                    now,
+                    bug.bug_id,
+                ),
+            )
+            return True
+
+    def manual_requeue(self, bug: BugCandidate, project: ProjectConfig) -> bool:
+        """One owner-approved retry without creating a permanent retry loop."""
+        now = utc_now()
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT status FROM bug_runs WHERE bug_id = ?", (bug.bug_id,)).fetchone()
+            if row and row["status"] not in {"failed", "skipped_stale"}:
+                return False
+            if not row:
+                conn.execute(
+                    """
+                    INSERT INTO bug_runs (
+                        bug_id, title, status, project_name, event_action, product_id,
+                        assigned_to, bug_type, bug_status, repo_url, target_branch,
+                        opened_by, opened_at, first_seen_at, updated_at
+                    )
+                    VALUES (?, ?, 'queued', ?, 'manual_retry', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        bug.bug_id,
+                        bug.title,
+                        project.name,
+                        bug.product_id,
+                        bug.assigned_to,
+                        bug.bug_type,
+                        bug.status,
+                        project.repo_url,
+                        project.target_branch,
+                        bug.opened_by,
+                        bug.opened_at,
+                        now,
+                        now,
+                    ),
+                )
+                return True
+            conn.execute(
+                """
+                UPDATE bug_runs
+                SET title = ?, status = 'queued', project_name = ?, event_action = 'manual_retry',
+                    product_id = ?, assigned_to = ?, bug_type = ?, bug_status = ?, repo_url = ?,
+                    target_branch = ?, opened_by = ?, opened_at = ?, triage_targets = '',
+                    commit_hash = '', error = '', writeback_payload = '', retry_count = 0,
+                    handled_once = 0, reactivated_after_auto_fix = 0, seen_resolved_once = 0,
+                    updated_at = ?, completed_at = NULL
+                WHERE bug_id = ?
+                """,
+                (
+                    bug.title,
+                    project.name,
+                    bug.product_id,
+                    bug.assigned_to,
+                    bug.bug_type,
+                    bug.status,
+                    project.repo_url,
+                    project.target_branch,
+                    bug.opened_by,
+                    bug.opened_at,
                     now,
                     bug.bug_id,
                 ),
@@ -248,7 +374,7 @@ class StateStore:
                 (since,),
             ).fetchall()
             queued = conn.execute(
-                "SELECT COUNT(*) AS count FROM bug_runs WHERE status = 'queued'"
+                "SELECT COUNT(*) AS count FROM bug_runs WHERE status IN ('queued', 'writeback_queued')"
             ).fetchone()
             running = conn.execute(
                 "SELECT COUNT(*) AS count FROM bug_runs WHERE status = 'running'"
@@ -260,18 +386,37 @@ class StateStore:
         failed = by_status.get("failed", 0)
         sync_conflict = by_status.get("sync_conflict", 0)
         manual_required = by_status.get("manual_required", 0)
+        unable_to_fix = by_status.get("unable_to_fix", 0)
+        retry_exhausted = by_status.get("retry_exhausted", 0)
+        writeback_failed = by_status.get("writeback_failed", 0)
         completed = sum(by_status.values())
         return {
             "completed": completed,
-            "auto_fixed": pushed + no_changes,
+            "auto_fixed": pushed,
             "pushed": pushed,
             "no_changes": no_changes,
             "failed": failed,
             "sync_conflict": sync_conflict,
             "manual_required": manual_required,
+            "unable_to_fix": unable_to_fix,
+            "retry_exhausted": retry_exhausted,
+            "writeback_failed": writeback_failed,
             "queued": int(queued["count"]) if queued else 0,
             "running": int(running["count"]) if running else 0,
         }
+
+    def current_problem_count(self) -> int:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count FROM bug_runs
+                WHERE status IN (
+                    'failed', 'sync_conflict', 'retry_exhausted',
+                    'writeback_failed', 'writeback_exhausted'
+                )
+                """
+            ).fetchone()
+        return int(row["count"]) if row else 0
 
     def record_poll_run(
         self,
@@ -372,22 +517,113 @@ class StateStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def claim_daily_counter(self, counter_name: str, day: str, limit: int) -> bool:
+        """Atomically consume one persisted daily allowance across threads and restarts."""
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT value FROM daily_counters WHERE counter_name = ? AND day = ?",
+                (counter_name, day),
+            ).fetchone()
+            current = int(row["value"]) if row else 0
+            if current >= limit:
+                conn.rollback()
+                return False
+            conn.execute(
+                """
+                INSERT INTO daily_counters (counter_name, day, value)
+                VALUES (?, ?, 1)
+                ON CONFLICT(counter_name, day)
+                DO UPDATE SET value = daily_counters.value + 1
+                """,
+                (counter_name, day),
+            )
+            conn.commit()
+            return True
+
+    def daily_counter_value(self, counter_name: str, day: str) -> int:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM daily_counters WHERE counter_name = ? AND day = ?",
+                (counter_name, day),
+            ).fetchone()
+        return int(row["value"]) if row else 0
+
+    def set_daily_counter(self, counter_name: str, day: str, value: int) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO daily_counters (counter_name, day, value)
+                VALUES (?, ?, ?)
+                ON CONFLICT(counter_name, day) DO UPDATE SET value = excluded.value
+                """,
+                (counter_name, day, max(0, value)),
+            )
+
+    def increment_daily_counter(self, counter_name: str, day: str) -> int:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO daily_counters (counter_name, day, value)
+                VALUES (?, ?, 1)
+                ON CONFLICT(counter_name, day)
+                DO UPDATE SET value = daily_counters.value + 1
+                """,
+                (counter_name, day),
+            )
+            row = conn.execute(
+                "SELECT value FROM daily_counters WHERE counter_name = ? AND day = ?",
+                (counter_name, day),
+            ).fetchone()
+        return int(row["value"])
+
     def queued_bug_ids(self) -> List[int]:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                "SELECT bug_id FROM bug_runs WHERE status = 'queued' ORDER BY first_seen_at ASC"
+                """
+                SELECT bug_id FROM bug_runs
+                WHERE status IN ('queued', 'writeback_queued')
+                ORDER BY first_seen_at ASC
+                """
             ).fetchall()
         return [int(row["bug_id"]) for row in rows]
 
-    def should_mark_manual_required(self, bug_id: int) -> bool:
+    def queue_writeback_retry(self, bug_id: int, max_retries: int = 1) -> bool:
+        now = utc_now()
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT status, handled_once, seen_resolved_once FROM bug_runs WHERE bug_id = ?",
+                "SELECT status, retry_count, writeback_payload FROM bug_runs WHERE bug_id = ?",
                 (bug_id,),
             ).fetchone()
-        if not row:
-            return False
-        return bool(row["handled_once"]) and row["status"] in AUTO_FIXED_STATUSES
+            if not row or row["status"] != "writeback_failed" or not row["writeback_payload"]:
+                return False
+            if int(row["retry_count"]) >= max_retries:
+                conn.execute(
+                    """
+                    UPDATE bug_runs
+                    SET status = 'writeback_exhausted', updated_at = ?, completed_at = ?
+                    WHERE bug_id = ?
+                    """,
+                    (now, now, bug_id),
+                )
+                return False
+            conn.execute(
+                """
+                UPDATE bug_runs
+                SET status = 'writeback_queued', retry_count = retry_count + 1,
+                    error = '', updated_at = ?, completed_at = NULL
+                WHERE bug_id = ?
+                """,
+                (now, bug_id),
+            )
+            return True
+
+    def set_writeback_payload(self, bug_id: int, payload: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE bug_runs SET writeback_payload = ?, updated_at = ? WHERE bug_id = ?",
+                (payload, utc_now(), bug_id),
+            )
 
     def mark_seen_resolved_once(self, bug_id: int, bug_status: str) -> None:
         with self._lock, self._connect() as conn:
@@ -400,16 +636,12 @@ class StateStore:
                 (bug_status, utc_now(), bug_id),
             )
 
-    def mark_manual_required(self, bug_id: int, reason: str) -> None:
+    def mark_unable_to_fix(self, bug_id: int, reason: str) -> None:
         with self._lock, self._connect() as conn:
             conn.execute(
                 """
                 UPDATE bug_runs
-                SET status = 'manual_required',
-                    reactivated_after_auto_fix = 1,
-                    error = ?,
-                    updated_at = ?,
-                    completed_at = COALESCE(completed_at, ?)
+                SET status = 'unable_to_fix', error = ?, updated_at = ?, completed_at = ?
                 WHERE bug_id = ?
                 """,
                 (reason, utc_now(), utc_now(), bug_id),
@@ -432,9 +664,9 @@ class StateStore:
                     INSERT INTO bug_runs (
                         bug_id, title, status, project_name, event_action, product_id,
                         assigned_to, bug_type, bug_status, repo_url, target_branch,
-                        opened_by, handled_once, error, first_seen_at, updated_at, completed_at
+                        opened_by, opened_at, handled_once, error, first_seen_at, updated_at, completed_at
                     )
-                    VALUES (?, ?, 'manual_required', ?, 'poll', ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+                    VALUES (?, ?, 'handled_in_zentao', ?, 'poll', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
                     """,
                     (
                         bug.bug_id,
@@ -447,6 +679,7 @@ class StateStore:
                         project.repo_url,
                         project.target_branch,
                         bug.opened_by,
+                        bug.opened_at,
                         "ZenTao already carries an AI comment for this bug; leaving it to a human.",
                         now,
                         now,
@@ -456,6 +689,17 @@ class StateStore:
             except sqlite3.IntegrityError:
                 return False
             return True
+
+    def mark_handled_in_zentao(self, bug_id: int) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE bug_runs
+                SET status = 'handled_in_zentao', error = ?, updated_at = ?, completed_at = ?
+                WHERE bug_id = ?
+                """,
+                ("ZenTao already carries a successful or unable-to-fix AI marker.", utc_now(), utc_now(), bug_id),
+            )
 
     def update_commit(self, bug_id: int, commit_hash: str) -> None:
         with self._lock, self._connect() as conn:
@@ -544,6 +788,9 @@ def _row_to_run(row: sqlite3.Row) -> RunRecord:
         commit_hash=row["commit_hash"],
         error=row["error"],
         handled_once=bool(row["handled_once"]),
+        event_action=row["event_action"],
         opened_by=row["opened_by"],
         triage_targets=row["triage_targets"],
+        retry_count=int(row["retry_count"]),
+        writeback_payload=row["writeback_payload"],
     )

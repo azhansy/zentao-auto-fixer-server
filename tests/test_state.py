@@ -7,6 +7,53 @@ from zentao_auto_fixer.state import StateStore
 
 
 class StateTests(unittest.TestCase):
+    def test_technical_failure_gets_one_automatic_retry_then_exhausts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            bug = _bug(1)
+            project = _project()
+            store.enqueue_first_run(bug, project)
+            store.update_status(1, "failed", completed=True)
+
+            self.assertTrue(store.requeue_retryable(bug, project))
+            self.assertEqual(store.get_run(1).retry_count, 1)
+            store.update_status(1, "failed", completed=True)
+            self.assertFalse(store.requeue_retryable(bug, project))
+            self.assertEqual(store.get_run(1).status, "retry_exhausted")
+
+    def test_writeback_retry_keeps_the_saved_success_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            store.enqueue_first_run(_bug(1), _project())
+            store.set_writeback_payload(1, '{"cause":"c","solution":"s"}')
+            store.update_status(1, "writeback_failed", completed=True)
+
+            self.assertTrue(store.queue_writeback_retry(1))
+            run = store.get_run(1)
+            self.assertEqual(run.status, "writeback_queued")
+            self.assertIn('"cause":"c"', run.writeback_payload)
+
+    def test_manual_requeue_is_one_shot_for_failed_stale_or_new_bugs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            project = _project()
+            failed = _bug(1)
+            stale = _bug(2)
+            new = _bug(3)
+            store.enqueue_first_run(failed, project)
+            store.enqueue_first_run(stale, project)
+            store.update_status(1, "failed", completed=True)
+            store.update_status(2, "skipped_stale", completed=True)
+
+            self.assertTrue(store.manual_requeue(failed, project))
+            self.assertTrue(store.manual_requeue(stale, project))
+            self.assertTrue(store.manual_requeue(new, project))
+            self.assertFalse(store.manual_requeue(failed, project))
+            for bug_id in (1, 2, 3):
+                run = store.get_run(bug_id)
+                self.assertEqual(run.status, "queued")
+                self.assertEqual(run.event_action, "manual_retry")
+
     def test_enqueue_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = StateStore(Path(tmp) / "state.sqlite3")
@@ -19,20 +66,28 @@ class StateTests(unittest.TestCase):
             self.assertEqual(run.status, "queued")
             self.assertEqual(run.project_name, "project")
 
-    def test_manual_required_after_one_auto_fix(self):
+    def test_skipped_ui_can_be_requeued_after_the_setting_is_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = StateStore(Path(tmp) / "state.sqlite3")
-            store.enqueue_first_run(_bug(1), _project())
-            self.assertFalse(store.should_mark_manual_required(1))
-            store.update_status(1, "pushed", handled_once=True, completed=True)
-            self.assertTrue(store.should_mark_manual_required(1))
+            bug = BugCandidate(
+                bug_id=1,
+                title="【UI】按钮错位",
+                product_id=8,
+                assigned_to="dev",
+                bug_type="codeerror",
+                status="active",
+                severity=3,
+                priority=2,
+                raw={},
+            )
+            project = _project()
+            store.enqueue_first_run(bug, project)
+            store.update_status(1, "skipped_ui", handled_once=False, completed=True)
 
-    def test_manual_required_not_triggered_by_failed_run(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            store = StateStore(Path(tmp) / "state.sqlite3")
-            store.enqueue_first_run(_bug(1), _project())
-            store.update_status(1, "failed", handled_once=True, completed=True)
-            self.assertFalse(store.should_mark_manual_required(1))
+            self.assertTrue(store.requeue_skipped_ui(bug, project))
+            run = store.get_run(1)
+            self.assertEqual(run.status, "queued")
+            self.assertFalse(run.handled_once)
 
     def test_record_poll_run(self):
         with tempfile.TemporaryDirectory() as tmp:

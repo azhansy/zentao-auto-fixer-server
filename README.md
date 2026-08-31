@@ -117,8 +117,11 @@ ZENTAO_RESOLVED_BUILD=主干
       "enabled": true,
       "zentaoProductId": 8,
       "zentaoAssignedTo": "",
-      "agent": "codex",
+      "agent": "claude",
+      "fallbackAgent": "codex",
       "skipPlatforms": ["android", "mac"],
+      "processUiBugs": false,
+      "allowFullXcodeBuild": false,
       "app": {
         "repoUrl": "git@gitlab.example.com:group/product-a-app.git",
         "targetBranch": "dev"
@@ -166,13 +169,12 @@ python3 -m zentao_auto_fixer.server
 | `AUTO_FIXER_DATA_DIR` | 本地数据目录，保存 SQLite、仓库缓存、worktree 和日志。 |
 | `AUTO_FIXER_POLL_INTERVAL_SECONDS` | 轮询间隔，单位秒。 |
 | `AUTO_FIXER_WORKERS` | 后台 worker 数量。 |
-| `AUTO_FIXER_MAX_AGENT_RUNS_PER_DAY` | 每天最多调用多少次 AI（一批 Bug 算一次），默认 `20`。到顶后 Bug 留在 `queued`，次日或重启后继续，防止轮询异常连环烧钱。 |
+| `AUTO_FIXER_MAX_AGENT_RUNS_PER_DAY` | 每天最多启动多少次 AI，默认 `20`。一批 Bug 通常算一次；Claude 额度耗尽后启动 Codex 后备会再算一次。到顶后不再启动后备，防止连环烧钱。 |
 | `AUTO_FIXER_PROJECTS_FILE` | 多项目映射文件路径。 |
 | `AUTO_FIXER_CODEX_BIN` | Codex CLI 路径，默认 `codex`。 |
 | `AUTO_FIXER_CLAUDE_BIN` | Claude Code CLI 路径，默认 `claude`；`agent=claude` 的项目会用它。 |
 | `AUTO_FIXER_CODEX_TIMEOUT_SECONDS` | AI 引擎单次执行最长时间，默认 `1800` 秒；设为 `0` 表示不限制。两种引擎共用。 |
 | `AUTO_FIXER_ZENTAO_CLIENT` | `zentao-bug-fixer` skill 的禅道 helper 路径，默认可填 `auto`。 |
-| `AUTO_FIXER_RETRY_FAILED` | 失败任务是否允许下一轮自动重试，默认建议 `0`。 |
 | `ZENTAO_BASE_URL` | 禅道根地址。 |
 | `ZENTAO_ACCOUNT` / `ZENTAO_PASSWORD` | 禅道账号密码。 |
 | `ZENTAO_API_PREFIX` | 禅道 REST API 前缀，常见为 `/api.php/v1`。 |
@@ -192,7 +194,10 @@ python3 -m zentao_auto_fixer.server
 | `zentaoProductId` | 禅道产品 ID。 |
 | `zentaoAssignedTo` | 只处理指定指派人；留空表示处理该产品全部符合条件的 Bug。 |
 | `skipPlatforms` | 暂时不处理的端，可填 `android`、`ios`、`mac`、`windows`、`web`。按 Bug 标题里的方括号标记（如 `【android】`）判断，只有标题标注的端**全部**在这个列表里才跳过，不入队也不调 AI。留空表示都处理。 |
+| `processUiBugs` | 是否处理标题带完整 `【UI】` / `[UI]` 标签的 Bug，大小写不敏感。默认 `false`，跳过且不调用 AI；只有明确改成 JSON 布尔值 `true` 才处理。普通正文里的 `UI` 或 `【UI设计】` 不算该标签。 |
+| `allowFullXcodeBuild` | 是否允许 AI 运行 `xcodebuild build/archive` 等完整构建。默认 `false`，只跑与改动直接相关的测试用例；设为 `true` 才允许完整构建。 |
 | `agent` | 用哪个 AI 引擎修这个项目，可填 `codex` 或 `claude`，不填默认 `codex`。可执行文件路径分别由 `AUTO_FIXER_CODEX_BIN` 和 `AUTO_FIXER_CLAUDE_BIN` 指定。 |
+| `fallbackAgent` | 可选后备引擎。当前仅在主引擎明确报告额度耗尽时切换；普通报错、超时或鉴权失败不会切换。每次后备启动也计入每日 AI 启动上限。 |
 | `app.repoUrl` / `app.targetBranch` | App 客户端仓库和目标分支。同一个仓库同时覆盖 Android 和 iOS。 |
 | `backend.repoUrl` / `backend.targetBranch` | 后端仓库和目标分支，可留空。留空时 AI 判定为后端问题的 Bug 会被打回给提 Bug 的人。 |
 | `repoUrl` / `targetBranch`（旧写法） | 顶层写法仍然兼容，等价于 `app`。 |
@@ -207,19 +212,20 @@ python3 -m zentao_auto_fixer.server
 - 禅道状态是「激活」（`active`）。
 - 如果配置了 `zentaoAssignedTo`，指派人必须匹配。
 - 如果 `onlyCodeBugs=true`，Bug 类型必须是代码类问题。
-- 本地 SQLite 里没有处理过这个 Bug。
+- 本地 SQLite 里没有成功或明确无法修复的终态；技术失败允许一次自动重试。
 - 标题标注的端不在 `skipPlatforms` 里（标题没写端的照常处理）。
+- 标题不带完整 `【UI】` / `[UI]` 标签；如需处理此类 Bug，项目必须显式配置 `processUiBugs=true`。
 - 禅道备注里没有 AI 处理过的标记（备注尾注含 `zentao-bug-fixer`）。换机器或清空本地数据库后，这条标记仍然能挡住重复修复。
 
-### 分诊、修复和打回
+### 分诊和修复
 
 入队后每一批 Bug 交给项目配置的 AI 引擎（`agent`，Codex 或 Claude Code）做一次「先分诊、再修复」：
 
 1. AI 读禅道详情，判断问题出在哪、复现在 Android 还是 iOS、要改 App 还是后端。
 2. 默认从 App 入手；确认是后端问题就改后端；两边都要改就一起改。
-3. 判断不出是什么问题的 Bug 标记为 `rejected`，服务会写一条说明缺哪些信息的禅道备注，并把 Bug **指派回提 Bug 的人**，状态保持激活，本地记为 `rejected_to_reporter`。
+3. 判断不出是什么问题的 Bug 标记为 `rejected`，服务只在本地记为 `unable_to_fix`；不写禅道、不改状态、不重新指派。
 
-**一条 Bug 只能描述一个端**：标题里同时标了多个端（例如 `【mac】【ios】`）的 Bug 不会被修，服务直接写备注请测试按端拆成多条，并指派回提 Bug 的人。这一步在调用 AI 之前完成，不消耗 AI 额度。
+**一条 Bug 只能描述一个端**：标题里同时标了多个端（例如 `【mac】【ios】`）的 Bug 不会被修，只在本地静默记录。这一步在调用 AI 之前完成，不消耗 AI 额度。
 
 禅道备注固定以「AI 理解的问题」和「复现步骤」开头，再写原因和解决方案，方便测试同事一眼核对 AI 理解的和自己报的是不是同一个问题：
 
@@ -242,11 +248,11 @@ iOS 端群聊消息重复响铃
 复现端：ios
 提交：app:abc1234
 ```
-4. AI 不做 git 提交、不写禅道；提交、推送、备注、解决、指派全部由服务在 AI 跑完之后执行。App 和后端各自提交推送到各自的目标分支。
+4. AI 不做 git 提交、不写禅道。只有实际产生代码、相关测试通过且 commit/push 成功，服务才写成功备注并解决 Bug；其他结果只记本地。App 和后端各自提交推送到各自的目标分支。
 
 ### 只修一次
 
-如果一个 Bug 已经自动修复过，后来测试验收不通过又变回激活状态，本服务不会再次自动处理，会标记为 `manual_required`，留给开发人工处理。
+禅道已经存在 AI 成功备注或 Bug 已解决时不再处理；明确无法修复的本地终态也不再处理。超时、结果缺失、同步冲突等技术失败在新 Bug 之后自动重试一次，仍失败则静默记为 `retry_exhausted`。
 
 ## 查看状态
 
@@ -293,11 +299,12 @@ cat .auto-fixer/logs/batch-<first>-<last>-triage.json   # AI 的分诊结论
 | --- | --- |
 | `queued` | 已入队，等待 worker 处理。 |
 | `running` | 正在同步仓库或修复。 |
-| `pushed` | 已提交并推送到目标分支。 |
-| `no_changes` | AI 结束但没有产生代码变更。 |
-| `sync_conflict` | push 时远端分支已有新提交，服务不会强推。 |
-| `rejected_to_reporter` | AI 分诊判断不出问题，已打回并指派回提 Bug 的人。 |
-| `manual_required` | 需要人工处理，例如自动修复后又被激活，或禅道备注里已有 AI 处理记录。 |
+| `pushed` | 代码、测试、提交、推送和禅道回写均已完成。 |
+| `unable_to_fix` | 没有修复到代码，只在本地静默记录。 |
+| `sync_conflict` | push 时远端分支已有新提交，等待一次自动重试。 |
+| `retry_exhausted` | 技术失败已重试一次，停止自动处理且不写禅道。 |
+| `writeback_failed` | 代码已推送，成功备注或解决操作等待一次独立重试。 |
+| `handled_in_zentao` | 禅道已经有 AI 完成标记，不再重复处理。 |
 | `failed` | 处理失败，查看 `error` 和 agent log。 |
 
 如果某个 Bug 的 `events` 长时间停在 `agent_attempt`，同时 AI 日志没有继续更新，通常表示引擎进程卡住了。可以通过 `AUTO_FIXER_CODEX_TIMEOUT_SECONDS` 设置单次最长执行时间。超时后服务会终止当前 AI 进程及其子进程，释放同仓库队列；如果 `AUTO_FIXER_CODEX_ATTEMPTS` 大于 1，会在同一个批次 worktree 内继续下一次尝试。

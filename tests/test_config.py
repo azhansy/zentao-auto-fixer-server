@@ -85,6 +85,27 @@ class ConfigTests(unittest.TestCase):
             )
             self.assertFalse(_load_single_project(path).has_backend_repo)
 
+    def test_full_xcodebuild_defaults_off_and_requires_boolean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "projects.json"
+            project = {
+                "name": "A",
+                "zentaoProductId": 8,
+                "repoUrl": "git@example.com:a.git",
+                "targetBranch": "develop",
+            }
+            path.write_text(json.dumps({"projects": [project]}), encoding="utf-8")
+            self.assertFalse(_load_single_project(path).allow_full_xcodebuild)
+
+            project["allowFullXcodeBuild"] = True
+            path.write_text(json.dumps({"projects": [project]}), encoding="utf-8")
+            self.assertTrue(_load_single_project(path).allow_full_xcodebuild)
+
+            project["allowFullXcodeBuild"] = "false"
+            path.write_text(json.dumps({"projects": [project]}), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                _load_single_project(path)
+
     def test_half_configured_backend_repo_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "projects.json"
@@ -124,6 +145,7 @@ class ConfigTests(unittest.TestCase):
                                 "name": "B",
                                 "zentaoProductId": 9,
                                 "agent": "Claude",
+                                "fallbackAgent": "Codex",
                                 "repoUrl": "git@example.com:b.git",
                                 "targetBranch": "dev",
                             },
@@ -135,6 +157,7 @@ class ConfigTests(unittest.TestCase):
             projects = _load_projects(path)
             self.assertEqual(projects[0].agent, "codex")
             self.assertEqual(projects[1].agent, "claude")
+            self.assertEqual(projects[1].fallback_agent, "codex")
 
     def test_unknown_agent_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -157,6 +180,22 @@ class ConfigTests(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 _load_projects(path)
+
+    def test_fallback_agent_must_be_supported_and_different(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "projects.json"
+            base = {
+                "name": "A",
+                "zentaoProductId": 8,
+                "agent": "claude",
+                "repoUrl": "git@example.com:a.git",
+                "targetBranch": "dev",
+            }
+            for fallback in ("gemini", "claude"):
+                project = dict(base, fallbackAgent=fallback)
+                path.write_text(json.dumps({"projects": [project]}), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    _load_projects(path)
 
     def test_agent_bin_picks_the_matching_binary(self):
         settings = Settings.from_env()

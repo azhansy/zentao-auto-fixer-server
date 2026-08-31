@@ -67,7 +67,12 @@ def make_handler(app: App):
         def do_GET(self) -> None:
             path, query = _path_and_query(self.path)
             if path == "/health":
-                self._json(HTTPStatus.OK, {"ok": True})
+                failed = app.state.current_problem_count()
+                summary = app.state.run_summary_since(app.started_at)
+                self._json(
+                    HTTPStatus.SERVICE_UNAVAILABLE if failed else HTTPStatus.OK,
+                    {"ok": not failed, "problems": failed, "queued": summary["queued"], "running": summary["running"]},
+                )
                 return
             if path == "/runs":
                 self._json(HTTPStatus.OK, {"runs": app.state.list_runs()})
@@ -190,14 +195,14 @@ def _format_timeout(timeout_seconds: Optional[int]) -> str:
 def _log_shutdown_summary(app: App) -> None:
     summary = app.state.run_summary_since(app.started_at)
     LOGGER.info(
-        "自动解决 Bug 服务已退出。本次完成处理 %s 个；自动修复 %s 个，其中已提交推送 %s 个、无代码变更 %s 个；失败 %s 个、同步冲突 %s 个、转人工 %s 个；退出时排队 %s 个、运行中 %s 个。",
+        "自动解决 Bug 服务已退出。本次完成处理 %s 个；成功推送并回写 %s 个；静默无法修复 %s 个；失败 %s 个、同步冲突 %s 个、重试耗尽 %s 个、回写失败 %s 个；退出时排队 %s 个、运行中 %s 个。",
         summary["completed"],
         summary["auto_fixed"],
-        summary["pushed"],
-        summary["no_changes"],
+        summary["unable_to_fix"],
         summary["failed"],
         summary["sync_conflict"],
-        summary["manual_required"],
+        summary["retry_exhausted"],
+        summary["writeback_failed"],
         summary["queued"],
         summary["running"],
     )

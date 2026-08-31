@@ -123,6 +123,11 @@ def push_head_dry_run(repo: Path, target_branch: str) -> None:
     run_git(["push", "--dry-run", "origin", f"HEAD:{target_branch}"], cwd=repo)
 
 
+def export_patch(repo: Path, baseline: str) -> str:
+    """A human-applicable patch (`git am`) of everything committed since baseline."""
+    return run_git(["format-patch", f"{baseline}..HEAD", "--stdout"], cwd=repo)
+
+
 def commit_all(repo: Path, message: str, author_name: str, author_email: str) -> str:
     env = os.environ.copy()
     env.update(

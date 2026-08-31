@@ -41,7 +41,6 @@ class Settings:
     logs_dir: Path
     projects_file: Path
     poll_interval_seconds: int
-    retry_failed: bool
     worker_count: int
     max_agent_runs_per_day: int
     codex_bin: str
@@ -70,7 +69,6 @@ class Settings:
             logs_dir=data_dir / "logs",
             projects_file=Path(os.getenv("AUTO_FIXER_PROJECTS_FILE", "projects.json")).resolve(),
             poll_interval_seconds=int(os.getenv("AUTO_FIXER_POLL_INTERVAL_SECONDS", "300")),
-            retry_failed=_bool_env("AUTO_FIXER_RETRY_FAILED", False),
             worker_count=max(1, int(os.getenv("AUTO_FIXER_WORKERS", "2"))),
             max_agent_runs_per_day=max(1, int(os.getenv("AUTO_FIXER_MAX_AGENT_RUNS_PER_DAY", "20"))),
             codex_bin=os.getenv("AUTO_FIXER_CODEX_BIN", "codex"),
@@ -134,6 +132,20 @@ def _project_from_json(item: Dict[str, Any], source: Path) -> ProjectConfig:
             f"Project {name or '?'} in {source} has agent {item.get('agent')!r}; "
             f"supported agents are {', '.join(SUPPORTED_AGENTS)}"
         )
+    fallback_agent = str(item.get("fallbackAgent") or "").strip().lower()
+    if fallback_agent and fallback_agent not in SUPPORTED_AGENTS:
+        raise ValueError(
+            f"Project {name or '?'} in {source} has fallbackAgent {item.get('fallbackAgent')!r}; "
+            f"supported agents are {', '.join(SUPPORTED_AGENTS)}"
+        )
+    if fallback_agent == agent:
+        raise ValueError(f"Project {name or '?'} in {source}: fallbackAgent must differ from agent")
+    process_ui_bugs = item.get("processUiBugs", False)
+    if not isinstance(process_ui_bugs, bool):
+        raise ValueError(f"Project {name or '?'} in {source}: processUiBugs must be true or false")
+    allow_full_xcodebuild = item.get("allowFullXcodeBuild", False)
+    if not isinstance(allow_full_xcodebuild, bool):
+        raise ValueError(f"Project {name or '?'} in {source}: allowFullXcodeBuild must be true or false")
     if missing:
         raise ValueError(f"Project config missing {', '.join(missing)} in {source}")
     return ProjectConfig(
@@ -148,7 +160,10 @@ def _project_from_json(item: Dict[str, Any], source: Path) -> ProjectConfig:
         backend_repo_url=backend_repo_url,
         backend_target_branch=backend_target_branch,
         agent=agent,
+        fallback_agent=fallback_agent,
         skip_platforms=skip_platforms,
+        process_ui_bugs=process_ui_bugs,
+        allow_full_xcodebuild=allow_full_xcodebuild,
     )
 
 
