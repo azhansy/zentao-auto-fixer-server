@@ -176,16 +176,17 @@
       row.dataset.bugId = run.bug_id;
       if (run.bug_id === selectedBug) row.className = "selected";
       const bugCell = document.createElement("td");
-      if (run.url) {
-        const bugLink = textNode("a", `#${run.bug_id}`);
-        bugLink.href = run.url;
-        bugLink.target = "_blank";
-        bugLink.rel = "noopener noreferrer";
-        bugLink.addEventListener("click", event => event.stopPropagation());
-        bugCell.append(bugLink);
-      } else {
-        bugCell.textContent = `#${run.bug_id}`;
-      }
+      const bugLink = textNode("a", `#${run.bug_id}`);
+      bugLink.href = run.url || "#";
+      bugLink.addEventListener("click", async event => {
+        event.stopPropagation();
+        if (run.url) return;
+        event.preventDefault();
+        const response = await fetch(`/runs/${run.bug_id}`);
+        const detail = response.ok ? (await response.json()).run : null;
+        if (detail?.url) window.location.assign(detail.url);
+      });
+      bugCell.append(bugLink);
       row.append(bugCell);
       row.append(textNode("td", run.title || "-", "title"));
       row.append(textNode("td", run.project_name || "-"));

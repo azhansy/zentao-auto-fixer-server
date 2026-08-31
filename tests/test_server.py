@@ -47,6 +47,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
         self.assertIn("禅道自动修复看板".encode(), body)
         self.assertIn(b"/runs?limit=500", body)
+        self.assertIn(b"window.location.assign(detail.url)", body)
 
     def test_runs_honors_bounded_limit(self):
         seen = []
