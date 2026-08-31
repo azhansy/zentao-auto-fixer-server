@@ -630,10 +630,10 @@ class StateStore:
             conn.execute(
                 """
                 UPDATE bug_runs
-                SET seen_resolved_once = 1, bug_status = ?, updated_at = ?
+                SET seen_resolved_once = 1, bug_status = ?
                 WHERE bug_id = ?
                 """,
-                (bug_status, utc_now(), bug_id),
+                (bug_status, bug_id),
             )
 
     def mark_unable_to_fix(self, bug_id: int, reason: str) -> None:

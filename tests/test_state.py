@@ -1,12 +1,27 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from zentao_auto_fixer.models import BugCandidate, ProjectConfig
 from zentao_auto_fixer.state import StateStore
 
 
 class StateTests(unittest.TestCase):
+    def test_resolved_poll_does_not_overwrite_task_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            store.enqueue_first_run(_bug(1), _project())
+            before = store.list_runs()[0]["updated_at"]
+
+            with mock.patch("zentao_auto_fixer.state.utc_now", return_value="2099-01-01T00:00:00+00:00"):
+                store.mark_seen_resolved_once(1, "resolved")
+
+            run = store.list_runs()[0]
+            self.assertEqual(run["updated_at"], before)
+            self.assertEqual(run["bug_status"], "resolved")
+            self.assertEqual(run["seen_resolved_once"], 1)
+
     def test_technical_failure_gets_one_automatic_retry_then_exhausts(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = StateStore(Path(tmp) / "state.sqlite3")
