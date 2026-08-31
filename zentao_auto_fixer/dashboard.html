@@ -41,6 +41,8 @@
     td.title { white-space: normal; min-width: 260px; }
     tr[data-bug-id] { cursor: pointer; }
     tr[data-bug-id]:hover, tr.selected { background: #1a2540; }
+    a { color: #93c5fd; font-weight: 650; text-decoration: none; }
+    a:hover { text-decoration: underline; }
     .badge { display: inline-flex; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 650; background: #334155; }
     .success { color: var(--green); background: #064e3b; }
     .failure { color: var(--red); background: #4c0519; }
@@ -173,7 +175,18 @@
       const row = document.createElement("tr");
       row.dataset.bugId = run.bug_id;
       if (run.bug_id === selectedBug) row.className = "selected";
-      row.append(textNode("td", `#${run.bug_id}`));
+      const bugCell = document.createElement("td");
+      if (run.url) {
+        const bugLink = textNode("a", `#${run.bug_id}`);
+        bugLink.href = run.url;
+        bugLink.target = "_blank";
+        bugLink.rel = "noopener noreferrer";
+        bugLink.addEventListener("click", event => event.stopPropagation());
+        bugCell.append(bugLink);
+      } else {
+        bugCell.textContent = `#${run.bug_id}`;
+      }
+      row.append(bugCell);
       row.append(textNode("td", run.title || "-", "title"));
       row.append(textNode("td", run.project_name || "-"));
       const statusCell = document.createElement("td");

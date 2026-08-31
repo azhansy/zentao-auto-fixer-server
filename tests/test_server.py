@@ -1,8 +1,10 @@
 import http.client
+import json
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from zentao_auto_fixer.server import make_handler
 
@@ -48,12 +50,25 @@ class DashboardTests(unittest.TestCase):
 
     def test_runs_honors_bounded_limit(self):
         seen = []
-        app = SimpleNamespace(state=SimpleNamespace(list_runs=lambda limit: seen.append(limit) or []))
+        app = SimpleNamespace(
+            state=SimpleNamespace(list_runs=lambda limit: seen.append(limit) or [{"bug_id": 7310}])
+        )
 
-        status, _headers, body = get(app, "/runs?limit=9999")
+        with patch.dict("os.environ", {"ZENTAO_BASE_URL": "https://zentao.example.test/zentao"}):
+            status, _headers, body = get(app, "/runs?limit=9999")
 
         self.assertEqual(status, 200)
-        self.assertEqual(body, b'{"runs": []}')
+        self.assertEqual(
+            json.loads(body),
+            {
+                "runs": [
+                    {
+                        "bug_id": 7310,
+                        "url": "https://zentao.example.test/zentao/bug-view-7310.html",
+                    }
+                ]
+            },
+        )
         self.assertEqual(seen, [500])
 
 

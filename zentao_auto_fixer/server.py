@@ -80,7 +80,11 @@ def make_handler(app: App):
                 )
                 return
             if path == "/runs":
-                self._json(HTTPStatus.OK, {"runs": app.state.list_runs(_limit_from_query(query))})
+                runs = app.state.list_runs(_limit_from_query(query))
+                self._json(
+                    HTTPStatus.OK,
+                    {"runs": [{**run, "url": bug_view_url(int(run["bug_id"]))} for run in runs]},
+                )
                 return
             if path == "/polls":
                 self._json(
