@@ -70,7 +70,7 @@ class Settings:
             projects_file=Path(os.getenv("AUTO_FIXER_PROJECTS_FILE", "projects.json")).resolve(),
             poll_interval_seconds=int(os.getenv("AUTO_FIXER_POLL_INTERVAL_SECONDS", "300")),
             worker_count=max(1, int(os.getenv("AUTO_FIXER_WORKERS", "2"))),
-            max_agent_runs_per_day=max(1, int(os.getenv("AUTO_FIXER_MAX_AGENT_RUNS_PER_DAY", "20"))),
+            max_agent_runs_per_day=max(1, int(os.getenv("AUTO_FIXER_MAX_AGENT_RUNS_PER_DAY", "100"))),
             codex_bin=os.getenv("AUTO_FIXER_CODEX_BIN", "codex"),
             claude_bin=os.getenv("AUTO_FIXER_CLAUDE_BIN", "claude"),
             codex_attempts=max(1, int(os.getenv("AUTO_FIXER_CODEX_ATTEMPTS", "3"))),

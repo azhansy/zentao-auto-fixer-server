@@ -176,7 +176,7 @@ class AgentCommandTests(unittest.TestCase):
 
 
 class CallSiteTests(unittest.TestCase):
-    def test_rebase_conflict_runs_one_budgeted_agent_resolution(self):
+    def test_rebase_conflict_keeps_resolving_until_remote_is_current(self):
         from types import SimpleNamespace
 
         from zentao_auto_fixer.git_ops import RebaseConflictError
@@ -193,7 +193,7 @@ class CallSiteTests(unittest.TestCase):
         )
         state = mock.Mock()
         worker = Worker(settings, state)
-        worker._claim_agent_budget = mock.Mock(return_value=True)
+        worker._claim_agent_run = mock.Mock(return_value=True)
         checkout = SimpleNamespace(
             kind="app",
             worktree=Path("/wt/app"),
@@ -206,7 +206,11 @@ class CallSiteTests(unittest.TestCase):
 
         with mock.patch(
             "zentao_auto_fixer.worker.rebase_onto_latest_remote",
-            side_effect=RebaseConflictError("conflict", "latest"),
+            side_effect=[
+                RebaseConflictError("conflict", "latest-1"),
+                RebaseConflictError("conflict again", "latest-2"),
+                "latest-2",
+            ],
         ), mock.patch(
             "zentao_auto_fixer.worker.run_agent_batch_fix", return_value=resolved
         ) as agent, mock.patch(
@@ -226,10 +230,10 @@ class CallSiteTests(unittest.TestCase):
                 )
             )
 
-        worker._claim_agent_budget.assert_called_once()
+        self.assertEqual(worker._claim_agent_run.call_count, 2)
         self.assertIn("conflict_context", agent.call_args.kwargs)
-        continue_rebase.assert_called_once_with(checkout.worktree, timeout=30)
-        self.assertEqual(checkout.baseline, "latest")
+        self.assertEqual(continue_rebase.call_count, 2)
+        self.assertEqual(checkout.baseline, "latest-2")
         self.assertEqual(verdicts[1]["solution"], "merged")
 
     def test_writeback_retry_never_runs_the_agent(self):

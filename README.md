@@ -169,7 +169,7 @@ python3 -m zentao_auto_fixer.server
 | `AUTO_FIXER_DATA_DIR` | 本地数据目录，保存 SQLite、仓库缓存、worktree 和日志。 |
 | `AUTO_FIXER_POLL_INTERVAL_SECONDS` | 轮询间隔，单位秒。 |
 | `AUTO_FIXER_WORKERS` | 后台 worker 数量。 |
-| `AUTO_FIXER_MAX_AGENT_RUNS_PER_DAY` | 每天最多启动多少次 AI，默认 `20`。一批 Bug 通常算一次；Claude 额度耗尽后启动 Codex 后备会再算一次。到顶后不再启动后备，防止连环烧钱。 |
+| `AUTO_FIXER_MAX_AGENT_RUNS_PER_DAY` | 每天最多启动多少次 AI，默认 `100`。一批 Bug 通常算一次；Claude 额度耗尽后启动 Codex 后备会再算一次。到顶后不再启动后备，防止连环烧钱。 |
 | `AUTO_FIXER_PROJECTS_FILE` | 多项目映射文件路径。 |
 | `AUTO_FIXER_CODEX_BIN` | Codex CLI 路径，默认 `codex`。 |
 | `AUTO_FIXER_CLAUDE_BIN` | Claude Code CLI 路径，默认 `claude`；`agent=claude` 的项目会用它。 |
