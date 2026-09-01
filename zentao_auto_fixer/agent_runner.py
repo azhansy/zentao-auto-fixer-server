@@ -345,6 +345,7 @@ def _agent_quota_exhausted(agent: str, output: str) -> bool:
         "usage limit reached",
         "usage limit has been reached",
         "out of extra usage",
+        "insufficient balance",
         "insufficient credits",
         "credit balance is too low",
         "exceeded your current quota",
