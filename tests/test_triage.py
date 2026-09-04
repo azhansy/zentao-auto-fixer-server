@@ -194,6 +194,7 @@ class AgentCommandTests(unittest.TestCase):
     def test_only_claude_quota_messages_trigger_fallback(self):
         self.assertTrue(_agent_quota_exhausted("claude", "You've hit your limit · resets at 1am"))
         self.assertTrue(_agent_quota_exhausted("claude", "Credit balance is too low"))
+        self.assertTrue(_agent_quota_exhausted("claude", "API Error: 402 Insufficient Balance"))
         self.assertFalse(_agent_quota_exhausted("claude", "authentication failed"))
         self.assertFalse(_agent_quota_exhausted("claude", "rate limit exceeded"))
         self.assertFalse(_agent_quota_exhausted("codex", "You've hit your limit"))
