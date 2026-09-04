@@ -203,6 +203,29 @@ class StateStore:
             )
             return True
 
+    def resurrect_retry_exhausted(self, bug_id: int) -> bool:
+        """Give a bug stuck in retry_exhausted/writeback_exhausted a fresh retry budget.
+
+        These two statuses are terminal by design (no code in poller.py ever requeues
+        them), so a bug that lands there stays stuck forever unless something resets it
+        by hand. Reset it to 'failed' (a RETRYABLE_STATUS) with retry_count back to 0 so
+        the next poll picks it up like a normal transient failure.
+        """
+        now = utc_now()
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT status FROM bug_runs WHERE bug_id = ?", (bug_id,)).fetchone()
+            if not row or row["status"] not in {"retry_exhausted", "writeback_exhausted"}:
+                return False
+            conn.execute(
+                """
+                UPDATE bug_runs
+                SET status = 'failed', retry_count = 0, error = ?, updated_at = ?, completed_at = NULL
+                WHERE bug_id = ?
+                """,
+                ("Resurrected after a retry budget increase; will be retried on the next poll.", now, bug_id),
+            )
+            return True
+
     def requeue_skipped_ui(self, bug: BugCandidate, project: ProjectConfig) -> bool:
         """Requeue a UI-tagged bug after processUiBugs is explicitly enabled."""
         now = utc_now()

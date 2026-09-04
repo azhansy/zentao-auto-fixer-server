@@ -148,7 +148,9 @@ class Poller:
                         continue
                     if existing.status == "writeback_failed":
                         zentao_state = self._already_handled_in_zentao(bug, project)
-                        if zentao_state == "fresh" and self.state.queue_writeback_retry(bug.bug_id):
+                        if zentao_state == "fresh" and self.state.queue_writeback_retry(
+                            bug.bug_id, max_retries=self.settings.max_bug_retries
+                        ):
                             self.worker.enqueue(bug.bug_id)
                             queued += 1
                         else:
@@ -161,7 +163,7 @@ class Poller:
                         if self._already_handled_in_zentao(bug, project) != "fresh":
                             skipped_existing += 1
                             continue
-                        if self.state.requeue_retryable(bug, project):
+                        if self.state.requeue_retryable(bug, project, max_retries=self.settings.max_bug_retries):
                             self.worker.enqueue(bug.bug_id)
                             queued += 1
                             requeued_failed += 1

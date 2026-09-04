@@ -36,6 +36,53 @@ class StateTests(unittest.TestCase):
             self.assertFalse(store.requeue_retryable(bug, project))
             self.assertEqual(store.get_run(1).status, "retry_exhausted")
 
+    def test_requeue_retryable_honors_a_higher_configured_ceiling(self):
+        # 一次跨多个 poll 周期的外部服务中断（如 2026-09-03 那次 Claude API 500/529 +
+        # 大量超时）不应该只给 2 次尝试就判 retry_exhausted；服务把这个上限做成了可配置的
+        # AUTO_FIXER_MAX_BUG_RETRIES，这里验证更高的上限确实会被遵守。
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            bug = _bug(1)
+            project = _project()
+            store.enqueue_first_run(bug, project)
+            store.update_status(1, "failed", completed=True)
+
+            for expected_retry_count in range(1, 5):
+                self.assertTrue(store.requeue_retryable(bug, project, max_retries=4))
+                self.assertEqual(store.get_run(1).retry_count, expected_retry_count)
+                store.update_status(1, "failed", completed=True)
+
+            self.assertFalse(store.requeue_retryable(bug, project, max_retries=4))
+            self.assertEqual(store.get_run(1).status, "retry_exhausted")
+
+    def test_resurrect_retry_exhausted_gives_a_fresh_retry_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            bug = _bug(1)
+            project = _project()
+            store.enqueue_first_run(bug, project)
+            store.update_status(1, "failed", completed=True)
+            store.requeue_retryable(bug, project)
+            store.update_status(1, "failed", completed=True)
+            store.requeue_retryable(bug, project)
+            self.assertEqual(store.get_run(1).status, "retry_exhausted")
+
+            self.assertTrue(store.resurrect_retry_exhausted(1))
+            run = store.get_run(1)
+            self.assertEqual(run.status, "failed")
+            self.assertEqual(run.retry_count, 0)
+
+            # 恢复正常的可重试状态之后，正常的 requeue 流程要能重新捡起它。
+            self.assertTrue(store.requeue_retryable(bug, project))
+            self.assertEqual(store.get_run(1).status, "queued")
+
+    def test_resurrect_retry_exhausted_ignores_non_exhausted_bugs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            store.enqueue_first_run(_bug(1), _project())
+            self.assertFalse(store.resurrect_retry_exhausted(1))
+            self.assertEqual(store.get_run(1).status, "queued")
+
     def test_writeback_retry_keeps_the_saved_success_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = StateStore(Path(tmp) / "state.sqlite3")

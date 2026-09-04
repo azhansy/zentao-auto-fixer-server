@@ -83,6 +83,22 @@ class RetryPolicyTests(unittest.TestCase):
             poller.poll_once()
 
         state.requeue_retryable.assert_called_once()
+        # max_retries 必须来自 Settings.max_bug_retries（可通过 AUTO_FIXER_MAX_BUG_RETRIES 配置），
+        # 不能悄悄退回 state.py 里那个只给 1 次重试的旧默认值。
+        self.assertEqual(state.requeue_retryable.call_args.kwargs["max_retries"], 4)
+        worker.enqueue.assert_called_once_with(1)
+
+    def test_writeback_retry_also_uses_the_configured_ceiling(self):
+        poller, state, worker = _ui_poller(process_ui_bugs=False)
+        state.get_run.return_value = SimpleNamespace(status="writeback_failed")
+        state.queue_writeback_retry.return_value = True
+        poller._already_handled_in_zentao = mock.Mock(return_value="fresh")
+
+        with mock.patch("zentao_auto_fixer.poller.list_project_bugs", return_value=[_bug("active")]):
+            poller.poll_once()
+
+        state.queue_writeback_retry.assert_called_once()
+        self.assertEqual(state.queue_writeback_retry.call_args.kwargs["max_retries"], 4)
         worker.enqueue.assert_called_once_with(1)
 
     def test_local_unable_to_fix_result_is_silently_terminal(self):
@@ -145,6 +161,7 @@ def _ui_poller(*, process_ui_bugs: bool, max_bugs_per_poll: int = 3):
     settings = SimpleNamespace(
         load_projects=lambda: [project],
         zentao_client_script=Path("/tmp/zentao_client.py"),
+        max_bug_retries=4,
     )
     state = mock.Mock()
     state.get_run.return_value = None

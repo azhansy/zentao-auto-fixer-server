@@ -229,6 +229,19 @@ class ConfigTests(unittest.TestCase):
             else:
                 os.environ["AUTO_FIXER_CODEX_TIMEOUT_SECONDS"] = old
 
+    def test_max_bug_retries_defaults_to_four_and_can_be_configured(self):
+        old = os.environ.get("AUTO_FIXER_MAX_BUG_RETRIES")
+        try:
+            os.environ.pop("AUTO_FIXER_MAX_BUG_RETRIES", None)
+            self.assertEqual(Settings.from_env().max_bug_retries, 4)
+            os.environ["AUTO_FIXER_MAX_BUG_RETRIES"] = "8"
+            self.assertEqual(Settings.from_env().max_bug_retries, 8)
+        finally:
+            if old is None:
+                os.environ.pop("AUTO_FIXER_MAX_BUG_RETRIES", None)
+            else:
+                os.environ["AUTO_FIXER_MAX_BUG_RETRIES"] = old
+
 
 def _load_single_project(path: Path):
     return _load_projects(path)[0]

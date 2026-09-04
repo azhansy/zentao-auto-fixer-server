@@ -48,6 +48,7 @@ class Settings:
     codex_attempts: int
     codex_retry_delay_seconds: int
     codex_timeout_seconds: Optional[int]
+    max_bug_retries: int
     zentao_client_script: Path
     git_timeout_seconds: int
     git_shallow_clone: bool
@@ -76,6 +77,10 @@ class Settings:
             codex_attempts=max(1, int(os.getenv("AUTO_FIXER_CODEX_ATTEMPTS", "3"))),
             codex_retry_delay_seconds=max(0, int(os.getenv("AUTO_FIXER_CODEX_RETRY_DELAY_SECONDS", "15"))),
             codex_timeout_seconds=_optional_positive_int_env("AUTO_FIXER_CODEX_TIMEOUT_SECONDS", 3600),
+            # 一次外部服务中断（Claude/Codex API 500/529、代理波动）可能横跨好几个 poll 周期；
+            # 单次重试（旧默认 1）在几小时的中断里会被迅速耗尽，之后 bug 会卡死在
+            # retry_exhausted，没有任何自动恢复路径（见 2026-09-03 那次连锁失败）。
+            max_bug_retries=max(1, int(os.getenv("AUTO_FIXER_MAX_BUG_RETRIES", "4"))),
             zentao_client_script=_zentao_client_script_from_env(),
             git_timeout_seconds=max(30, int(os.getenv("AUTO_FIXER_GIT_TIMEOUT_SECONDS", "1800"))),
             git_shallow_clone=_bool_env("AUTO_FIXER_GIT_SHALLOW_CLONE", True),
