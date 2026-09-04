@@ -17,7 +17,8 @@ from zentao_auto_fixer.agent_runner import (
     read_triage_result,
     stop_active_agents,
 )
-from zentao_auto_fixer.worker import _cause_text
+from zentao_auto_fixer.models import RunRecord
+from zentao_auto_fixer.worker import _cause_text, _commit_message
 from zentao_auto_fixer.zentao import _candidate_from_bug, bug_has_ai_comment
 
 
@@ -106,6 +107,60 @@ class CommentTextTests(unittest.TestCase):
 
     def test_missing_understanding_and_steps_still_produce_a_comment(self):
         self.assertEqual(_cause_text({}, "原因分析", "y"), "【原因分析】\ny")
+
+
+class CommitMessageTests(unittest.TestCase):
+    def test_single_bug_uses_conventional_commit_with_bug_id_as_scope(self):
+        run = _run(7499, "【Android】查看已删除子任务报错")
+        verdicts = {7499: {"solution": "toSubDetailLoaded 改用 errorMessage()，不再拼裸错误码"}}
+
+        message = _commit_message([run], verdicts)
+
+        self.assertEqual(message, "fix(7499): toSubDetailLoaded 改用 errorMessage()，不再拼裸错误码")
+
+    def test_falls_back_to_understanding_then_title_when_solution_is_missing(self):
+        run = _run(7500, "标题兜底")
+        self.assertEqual(
+            _commit_message([run], {7500: {"understanding": "只有理解，没有 solution"}}),
+            "fix(7500): 只有理解，没有 solution",
+        )
+        self.assertEqual(_commit_message([run], {7500: {}}), "fix(7500): 标题兜底")
+
+    def test_long_summary_is_truncated_to_a_reasonable_subject_length(self):
+        run = _run(7501, "标题")
+        long_solution = "改动说明" * 30
+        message = _commit_message([run], {7501: {"solution": long_solution}})
+        self.assertTrue(message.startswith("fix(7501): "))
+        self.assertLessEqual(len(message.split(": ", 1)[1]), 72)
+        self.assertTrue(message.endswith("…"))
+
+    def test_multi_bug_batch_lists_each_bug_on_its_own_line(self):
+        runs = [_run(7499, "标题 A"), _run(7500, "标题 B")]
+        verdicts = {
+            7499: {"solution": "修复 A"},
+            7500: {"solution": "修复 B"},
+        }
+
+        message = _commit_message(runs, verdicts)
+
+        self.assertTrue(message.startswith("fix(7499,7500): "))
+        self.assertIn("- #7499 修复 A", message)
+        self.assertIn("- #7500 修复 B", message)
+
+
+def _run(bug_id: int, title: str) -> RunRecord:
+    return RunRecord(
+        bug_id=bug_id,
+        title=title,
+        status="running",
+        project_name="project",
+        target_branch="main",
+        repo_url="git@example.com:project.git",
+        product_id=1,
+        commit_hash="",
+        error="",
+        handled_once=True,
+    )
 
 
 class AgentCommandTests(unittest.TestCase):

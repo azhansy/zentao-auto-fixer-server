@@ -580,7 +580,7 @@ class Worker:
             LOGGER.info("Worker finished batch %s with no changes", batch_label)
             return
 
-        commit_message = f"fix: zentao batch {batch_label}"
+        commit_message = _commit_message(fixed, verdicts)
         for checkout in changed:
             if has_changes(checkout.worktree):
                 self.state.record_run_events(bug_ids, f"commit_start_{checkout.kind}", commit_message)
@@ -970,3 +970,25 @@ def _looks_like_non_fast_forward(error: str) -> bool:
 
 def _batch_label(batch: List[RunRecord]) -> str:
     return " ".join(f"#{run.bug_id}" for run in batch)
+
+
+def _commit_message(fixed: List[RunRecord], verdicts: Dict[int, Dict[str, Any]]) -> str:
+    """Conventional-commit style with the ZenTao bug id as scope: fix(7499): 具体修复的内容."""
+    if len(fixed) == 1:
+        run = fixed[0]
+        return f"fix({run.bug_id}): {_fix_summary(verdicts.get(run.bug_id, {}), run.title)}"
+    ids = ",".join(str(run.bug_id) for run in fixed)
+    lines = [f"fix({ids}): 批量修复 {len(fixed)} 个禅道 Bug"]
+    for run in fixed:
+        lines.append(f"- #{run.bug_id} {_fix_summary(verdicts.get(run.bug_id, {}), run.title)}")
+    return "\n".join(lines)
+
+
+def _fix_summary(verdict: Dict[str, Any], title: str) -> str:
+    """One line describing the actual fix, for the commit subject — not the raw ZenTao title."""
+    text = (verdict.get("solution") or verdict.get("understanding") or title or "").strip()
+    text = " ".join(text.split())
+    limit = 72
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    return text or "修复问题"
