@@ -978,7 +978,8 @@ def _commit_message(fixed: List[RunRecord], verdicts: Dict[int, Dict[str, Any]])
         run = fixed[0]
         return f"fix({run.bug_id}): {_fix_summary(verdicts.get(run.bug_id, {}), run.title)}"
     ids = ",".join(str(run.bug_id) for run in fixed)
-    lines = [f"fix({ids}): 批量修复 {len(fixed)} 个禅道 Bug"]
+    summary = "；".join(_fix_summary(verdicts.get(run.bug_id, {}), run.title) for run in fixed)
+    lines = [f"fix({ids}): {summary}"]
     for run in fixed:
         lines.append(f"- #{run.bug_id} {_fix_summary(verdicts.get(run.bug_id, {}), run.title)}")
     return "\n".join(lines)

@@ -143,7 +143,7 @@ class CommitMessageTests(unittest.TestCase):
 
         message = _commit_message(runs, verdicts)
 
-        self.assertTrue(message.startswith("fix(7499,7500): "))
+        self.assertEqual(message.splitlines()[0], "fix(7499,7500): 修复 A；修复 B")
         self.assertIn("- #7499 修复 A", message)
         self.assertIn("- #7500 修复 B", message)
 
