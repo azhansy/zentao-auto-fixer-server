@@ -67,7 +67,7 @@ ZenTao Auto Fixer Server
                 +-- 记录处理状态和事件日志
 ```
 
-同一个项目、同一个 Git 仓库、同一个目标分支中已经入队的 Bug 会合成一个批次处理：同步一次仓库（配了后端仓库就同步两个），AI 一次性分诊并修复这一批 Bug，验证通过后每个仓库各生成一个批次 commit 并 push。不同 Git 仓库可以并行处理；同一个 Git 仓库仍然串行，避免多个批次同时改同一条目标分支。
+所有项目的待处理 Bug 按 ID 从小到大优先派发，默认保留三个任务并发，每个任务只修一个 Bug。每轮轮询先收集所有项目，再从待处理队列取最小 ID；新发现的小 ID 优先占用下一个空闲 worker，不中断已有任务。完成顺序由实际耗时决定，失败沿用有限重试和熔断。
 
 ## 不做什么
 
@@ -168,7 +168,7 @@ python3 -m zentao_auto_fixer.server
 | `AUTO_FIXER_PORT` | HTTP 查询服务端口。 |
 | `AUTO_FIXER_DATA_DIR` | 本地数据目录，保存 SQLite、仓库缓存、worktree 和日志。 |
 | `AUTO_FIXER_POLL_INTERVAL_SECONDS` | 轮询间隔，单位秒。 |
-| `AUTO_FIXER_WORKERS` | 后台 worker 数量，默认 `3`。每个 worker 使用独立 worktree 并行分析和测试；同一仓库最终同步与 push 串行执行。 |
+| `AUTO_FIXER_WORKERS` | 默认 `3`，按 ID 升序取任务并发处理；同仓库最终同步与 push 仍串行。 |
 | `AUTO_FIXER_MAX_AGENT_RUNS_PER_DAY` | 每天最多启动多少次 AI，默认 `100`。一批 Bug 通常算一次；Claude 额度耗尽后启动 Codex 后备会再算一次。到顶后不再启动后备，防止连环烧钱。 |
 | `AUTO_FIXER_PROJECTS_FILE` | 多项目映射文件路径。 |
 | `AUTO_FIXER_CODEX_BIN` | Codex CLI 路径，默认 `codex`。 |
@@ -202,7 +202,7 @@ python3 -m zentao_auto_fixer.server
 | `backend.repoUrl` / `backend.targetBranch` | 后端仓库和目标分支，可留空。留空时 AI 判定为后端问题的 Bug 会被打回给提 Bug 的人。 |
 | `repoUrl` / `targetBranch`（旧写法） | 顶层写法仍然兼容，等价于 `app`。 |
 | `onlyCodeBugs` | 是否只处理代码类 Bug，建议保持 `true`。 |
-| `maxBugsPerPoll` | 每轮最多入队多少个 Bug。 |
+| `maxBugsPerPoll` | 兼容旧配置；不再限制入队或合并批次，避免小 ID 被留到后续轮次。每次只修一个 Bug。 |
 
 ## 自动处理规则
 
@@ -399,3 +399,5 @@ __pycache__/
 ## License
 
 如果准备正式开源，请在仓库中补充许可证文件，例如 `MIT`、`Apache-2.0` 或团队内部指定许可证。
+
+禅道修复备注会在 Skill 署名前列出本次 AI、模型和执行器。Claude Code 使用运行结果中的 `modelUsage`，不按启动脚本名称推测；无法核验时明确标记未确认。该信息随回写内容持久化，回写重试不会套用新配置。

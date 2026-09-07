@@ -1,5 +1,6 @@
 import unittest
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -112,7 +113,7 @@ class RetryPolicyTests(unittest.TestCase):
         poller._already_handled_in_zentao.assert_not_called()
         worker.enqueue.assert_not_called()
 
-    def test_fresh_bug_is_queued_before_an_older_retry(self):
+    def test_lower_id_retry_is_queued_before_fresh_bug_even_with_old_poll_limit(self):
         poller, state, worker = _ui_poller(process_ui_bugs=False, max_bugs_per_poll=1)
         older_retry = BugCandidate(**{**_bug("active").__dict__, "bug_id": 1, "opened_at": "2026-08-01"})
         newer_fresh = BugCandidate(**{**older_retry.__dict__, "bug_id": 2, "opened_at": "2026-08-02"})
@@ -128,8 +129,8 @@ class RetryPolicyTests(unittest.TestCase):
             poller.poll_once()
 
         state.enqueue_first_run.assert_called_once_with(newer_fresh, mock.ANY)
-        state.requeue_retryable.assert_not_called()
-        worker.enqueue.assert_called_once_with(2)
+        state.requeue_retryable.assert_called_once()
+        self.assertEqual(worker.enqueue.call_args_list, [mock.call(1), mock.call(2)])
 
 
 def _bug(status: str, title="bug", **raw) -> BugCandidate:
@@ -166,6 +167,7 @@ def _ui_poller(*, process_ui_bugs: bool, max_bugs_per_poll: int = 3):
     state = mock.Mock()
     state.get_run.return_value = None
     worker = mock.Mock()
+    worker.dispatch_lock = threading.Lock()
     return Poller(settings, state, worker), state, worker
 
 

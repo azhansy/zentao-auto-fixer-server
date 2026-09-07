@@ -54,7 +54,7 @@ def run_agent_batch_fix(
         allow_full_xcodebuild=allow_full_xcodebuild,
         conflict_context=conflict_context,
     )
-    _run_agent(
+    output = _run_agent(
         agent,
         agent_bin,
         app_worktree,
@@ -65,7 +65,29 @@ def run_agent_batch_fix(
         env_overrides=env_overrides,
         log_label=_bug_log_label(bugs),
     )
-    return read_triage_result(result_path, [bug_id for bug_id, _title in bugs])
+    verdicts = read_triage_result(result_path, [bug_id for bug_id, _title in bugs])
+    for verdict in verdicts.values():
+        verdict["ai_info"] = _runtime_ai_info(agent, output)
+    return verdicts
+
+
+def _runtime_ai_info(agent: str, output: str) -> str:
+    executor = "Claude Code" if agent == "claude" else "Codex"
+    if agent == "claude":
+        for line in reversed(output.splitlines()):
+            try:
+                result = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(result, dict) or result.get("type") != "result":
+                continue
+            usage = result.get("modelUsage")
+            if isinstance(usage, dict) and usage:
+                models = [model for model in usage if isinstance(model, str) and model.strip()]
+                if models:
+                    names = [f"DeepSeek（{model}）" if model.startswith("deepseek-") else model for model in models]
+                    return f"AI / 模型：{'、'.join(names)}；执行器：{executor}"
+    return f"AI / 模型：未确认；执行器：{executor}（无运行时模型记录）"
 
 
 def _batch_prompt(
@@ -230,7 +252,7 @@ def build_agent_command(
     if agent == "claude":
         # The prompt is a positional argument and --add-dir is variadic, so the prompt must come first
         # or --add-dir would swallow it.
-        cmd = [agent_bin, "-p", prompt, "--dangerously-skip-permissions"]
+        cmd = [agent_bin, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"]
         for extra in extra_dirs:
             cmd.extend(["--add-dir", str(extra)])
         return cmd

@@ -354,7 +354,7 @@ class StateStore:
                   AND project_name = ?
                   AND repo_url = ?
                   AND target_branch = ?
-                ORDER BY first_seen_at ASC
+                ORDER BY bug_id ASC
                 """,
                 (leader["project_name"], leader["repo_url"], leader["target_branch"]),
             ).fetchall()
@@ -606,7 +606,7 @@ class StateStore:
                 """
                 SELECT bug_id FROM bug_runs
                 WHERE status IN ('queued', 'writeback_queued')
-                ORDER BY first_seen_at ASC
+                ORDER BY bug_id ASC
                 """
             ).fetchall()
         return [int(row["bug_id"]) for row in rows]

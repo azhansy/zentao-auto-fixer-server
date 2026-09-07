@@ -57,9 +57,10 @@ class Worker:
     def __init__(self, settings: Settings, state: StateStore):
         self.settings = settings
         self.state = state
-        self.queue: "queue.Queue[int]" = queue.Queue()
+        self.queue: "queue.PriorityQueue[int]" = queue.PriorityQueue()
         self._queued_ids = set()
         self._queue_guard = threading.Lock()
+        self.dispatch_lock = threading.Lock()
         self._threads: List[threading.Thread] = []
         self._stop = threading.Event()
         self._repo_locks: Dict[str, threading.Lock] = {}
@@ -71,12 +72,12 @@ class Worker:
     def start(self) -> None:
         if self._threads:
             return
+        for bug_id in self.state.queued_bug_ids():
+            self.enqueue(bug_id)
         for index in range(self.settings.worker_count):
             thread = threading.Thread(target=self._run, name=f"auto-fixer-worker-{index + 1}", daemon=True)
             thread.start()
             self._threads.append(thread)
-        for bug_id in self.state.queued_bug_ids():
-            self.enqueue(bug_id)
 
     def stop(self) -> None:
         self._stop.set()
@@ -96,7 +97,14 @@ class Worker:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            bug_id = self.queue.get()
+            with self.dispatch_lock:
+                try:
+                    bug_id = self.queue.get_nowait()
+                except queue.Empty:
+                    bug_id = None
+            if bug_id is None:
+                self._stop.wait(0.5)
+                continue
             if bug_id < 0:
                 continue
             try:
@@ -255,7 +263,7 @@ class Worker:
         return None
 
     def _process_batch(self, leader_bug_id: int, project: ProjectConfig) -> None:
-        batch = self.state.claim_queued_batch(leader_bug_id, limit=project.max_bugs_per_poll)
+        batch = self.state.claim_queued_batch(leader_bug_id, limit=1)
         if not batch:
             return
         skipped_ui = [run for run in batch if has_ui_tag(run.title) and not project.process_ui_bugs]
@@ -953,6 +961,7 @@ def _solution_text(verdict: Dict[str, Any], commit_summary: str) -> str:
     if verdict.get("verification_passed") and verdict.get("verification_command"):
         parts.append(f"测试：{verdict['verification_command']}")
     parts.append(f"提交：{commit_summary}")
+    parts.append(verdict.get("ai_info") or "AI / 模型：未确认（无运行时记录）")
     return "\n".join(parts)
 
 

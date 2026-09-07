@@ -44,8 +44,10 @@ class Poller:
 
     def poll_once(self) -> None:
         projects = [project for project in self.settings.load_projects() if project.enabled]
-        for project in projects:
-            self._poll_project(project)
+        # ponytail: dispatch pauses during polling; publish a collected snapshot if polling latency grows.
+        with self.worker.dispatch_lock:
+            for project in projects:
+                self._poll_project(project)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -94,13 +96,7 @@ class Poller:
             bugs = list_project_bugs(self.settings.zentao_client_script, project)
             total = len(bugs)
             existing_runs = {bug.bug_id: self.state.get_run(bug.bug_id) for bug in bugs}
-            bugs.sort(
-                key=lambda bug: (
-                    existing_runs[bug.bug_id] is not None,
-                    bug.opened_at or "9999",
-                    bug.bug_id,
-                )
-            )
+            bugs.sort(key=lambda bug: bug.bug_id)
             for bug in bugs:
                 if bug.bug_id <= 0:
                     skipped_resolved += 1
@@ -138,9 +134,7 @@ class Poller:
                         skipped_existing += 1
                         continue
                     if existing.status == "skipped_ui" and project.process_ui_bugs:
-                        if queued >= project.max_bugs_per_poll:
-                            skipped_existing += 1
-                        elif self.state.requeue_skipped_ui(bug, project):
+                        if self.state.requeue_skipped_ui(bug, project):
                             self.worker.enqueue(bug.bug_id)
                             queued += 1
                         else:
@@ -157,9 +151,6 @@ class Poller:
                             skipped_existing += 1
                         continue
                     if existing.status in RETRYABLE_STATUSES:
-                        if queued >= project.max_bugs_per_poll:
-                            skipped_existing += 1
-                            continue
                         if self._already_handled_in_zentao(bug, project) != "fresh":
                             skipped_existing += 1
                             continue
@@ -176,9 +167,6 @@ class Poller:
                     skipped_existing += 1
                     continue
 
-                if queued >= project.max_bugs_per_poll:
-                    skipped_existing += 1
-                    continue
                 zentao_state = self._already_handled_in_zentao(bug, project)
                 if zentao_state == "handled":
                     marked_manual += 1
