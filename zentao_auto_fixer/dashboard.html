@@ -142,14 +142,14 @@
 
 <script>
   const statusLabels = {
-    queued: "排队", running: "进行中", pushed: "成功修复", failed: "失败",
+    merge_request_failed: "MR 交付待处理", awaiting_merge: "已提 MR，待合并", queued: "排队", running: "进行中", pushed: "成功修复", failed: "失败",
     sync_conflict: "同步冲突", retry_exhausted: "重试耗尽",
     writeback_queued: "等待回写", writeback_failed: "回写失败", writeback_exhausted: "回写耗尽",
     unable_to_fix: "无法定位", handled_in_zentao: "禅道已处理", manual_required: "待人工",
     skipped_stale: "已过期", skipped_ui: "跳过 UI", skipped_platform: "跳过平台",
     rejected_to_reporter: "旧版退回", no_changes: "无代码改动"
   };
-  const failureStatuses = new Set(["failed", "sync_conflict", "retry_exhausted", "writeback_failed", "writeback_exhausted"]);
+  const failureStatuses = new Set(["merge_request_failed", "failed", "sync_conflict", "retry_exhausted", "writeback_failed", "writeback_exhausted"]);
   const queuedStatuses = new Set(["queued", "writeback_queued"]);
   let runs = [];
   let selectedBug = null;

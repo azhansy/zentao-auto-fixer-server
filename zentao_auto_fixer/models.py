@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional, Tuple
 
 TERMINAL_STATUSES = {
     "pushed",
+    "awaiting_merge",
+    "merge_request_failed",
     "handled_in_zentao",
     "unable_to_fix",
     "retry_exhausted",
@@ -70,6 +72,8 @@ class ProjectConfig:
     target_branch: str
     only_code_bugs: bool
     max_bugs_per_poll: int
+    delivery_mode: str = "push"
+    backend_delivery_mode: str = "push"
     backend_repo_url: str = ""
     backend_target_branch: str = ""
     agent: str = "codex"

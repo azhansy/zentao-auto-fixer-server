@@ -116,8 +116,8 @@ def _project_from_json(item: Dict[str, Any], source: Path) -> ProjectConfig:
     if not isinstance(item, dict):
         raise ValueError(f"Invalid project item in {source}: expected object")
     name = str(item.get("name") or "").strip()
-    app_repo_url, app_target_branch = _repo_entry(item, "app")
-    backend_repo_url, backend_target_branch = _repo_entry(item, "backend")
+    app_repo_url, app_target_branch, app_delivery_mode = _repo_entry(item, "app")
+    backend_repo_url, backend_target_branch, backend_delivery_mode = _repo_entry(item, "backend")
     product_id = item.get("zentaoProductId")
     missing = []
     if not name:
@@ -160,6 +160,8 @@ def _project_from_json(item: Dict[str, Any], source: Path) -> ProjectConfig:
         zentao_assigned_to=str(item.get("zentaoAssignedTo") or "").strip(),
         repo_url=app_repo_url,
         target_branch=app_target_branch,
+        delivery_mode=app_delivery_mode,
+        backend_delivery_mode=backend_delivery_mode,
         only_code_bugs=bool(item.get("onlyCodeBugs", True)),
         max_bugs_per_poll=max(1, int(item.get("maxBugsPerPoll", 1))),
         backend_repo_url=backend_repo_url,
@@ -193,9 +195,13 @@ def _repo_entry(item: Dict[str, Any], key: str) -> tuple:
     entry = item.get(key)
     if not isinstance(entry, dict):
         entry = item if key == "app" else {}
+    mode = entry.get("deliveryMode", "push")
+    if mode not in ("push", "merge_request"):
+        raise ValueError(f"{key}.deliveryMode must be push or merge_request")
     return (
         str(entry.get("repoUrl") or "").strip(),
         str(entry.get("targetBranch") or "").strip(),
+        mode,
     )
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 import os
 import shutil
 import subprocess
@@ -189,6 +190,19 @@ def push_branch(repo: Path, branch: str) -> None:
 
 def push_head_to_branch(repo: Path, target_branch: str) -> None:
     run_git(["push", "origin", f"HEAD:{target_branch}"], cwd=repo)
+
+
+def push_merge_request(repo: Path, source_branch: str, target_branch: str, title: str) -> str:
+    """Use GitLab's native push options; a branch push alone is not a created MR."""
+    output = run_git([
+        "push", "origin", f"HEAD:refs/heads/{source_branch}",
+        "-o", "merge_request.create", "-o", f"merge_request.target={target_branch}",
+        "-o", f"merge_request.title={title.splitlines()[0]}",
+    ], cwd=repo)
+    match = re.search(r"https?://[^\s<>]+/merge_requests/[0-9]+(?=\s|$)", output)
+    if not match:
+        raise GitError(f"修复分支 {source_branch} 已推送，但未确认 MR 创建；请检查远端分支。\n{output}")
+    return match.group(0)
 
 
 def remove_worktree(repo_cache: Path, worktree: Path) -> None:

@@ -31,6 +31,7 @@ from .git_ops import (
     has_changes,
     head_commit,
     push_head_dry_run,
+    push_merge_request,
     push_head_to_branch,
     rebase_onto_latest_remote,
     remove_worktree,
@@ -303,6 +304,10 @@ class Worker:
                 checkouts["backend"] = self._prepare_checkout(
                     bug_ids, "backend", backend_repo[0], backend_repo[1], batch_label
                 )
+
+            checkouts["app"].delivery_mode = project.delivery_mode
+            if "backend" in checkouts:
+                checkouts["backend"].delivery_mode = project.backend_delivery_mode
 
             result_path = self.settings.logs_dir / f"batch-{bug_ids[0]}-{bug_ids[-1]}-triage.json"
             agent_log = self.settings.logs_dir / f"batch-{bug_ids[0]}-{bug_ids[-1]}-agent.log"
@@ -616,6 +621,8 @@ class Worker:
 
             retry_refresh = False
             for checkout in changed:
+                if checkout.delivery_mode == "merge_request":
+                    continue
                 try:
                     self.state.record_run_events(bug_ids, f"push_check_{checkout.kind}", checkout.target_branch)
                     push_head_dry_run(checkout.worktree, checkout.target_branch)
@@ -632,14 +639,21 @@ class Worker:
                 break
 
         pushed: List[str] = []
+        merge_requests: List[str] = []
         for checkout in changed:
             while True:
                 try:
                     self.state.record_run_events(bug_ids, f"push_start_{checkout.kind}", checkout.target_branch)
-                    push_head_to_branch(checkout.worktree, checkout.target_branch)
+                    if checkout.delivery_mode == "merge_request":
+                        source = f"zentao-fix/{bug_ids[0]}-{bug_ids[-1]}-{head_commit(checkout.worktree)[:12]}"
+                        url = push_merge_request(checkout.worktree, source, checkout.target_branch, commit_message)
+                        merge_requests.append(url)
+                        self.state.record_run_events(bug_ids, f"merge_request_created_{checkout.kind}", url)
+                    else:
+                        push_head_to_branch(checkout.worktree, checkout.target_branch)
                     break
                 except GitError as exc:
-                    if _looks_like_non_fast_forward(str(exc)):
+                    if checkout.delivery_mode == "push" and _looks_like_non_fast_forward(str(exc)):
                         self.state.record_run_events(bug_ids, f"push_retry_{checkout.kind}", str(exc))
                         if not self._rebase_changed_checkouts(
                             fixed,
@@ -659,7 +673,12 @@ class Worker:
                             f"仓库 {'、'.join(pushed)} 的修复已经推送（{' '.join(commits)}），"
                             f"但 {checkout.kind} 推送失败，修复只落地了一半，需要人工处理：{exc}"
                         )
-                    self._fail_push(fixed, checkout, batch_label, detail, " ".join(commits))
+                    if checkout.delivery_mode == "merge_request":
+                        patch = self._save_conflict_patch(checkout, batch_label)
+                        detail += f"\n已保留修复，停止自动重跑 AI；补丁：{patch}"
+                        self._fail_batch(fixed, "merge_request_failed", detail, " ".join(commits))
+                    else:
+                        self._fail_push(fixed, checkout, batch_label, detail, " ".join(commits))
                     LOGGER.error(
                         "Worker push failed batch %s repo=%s (already pushed: %s): %s",
                         batch_label,
@@ -669,12 +688,13 @@ class Worker:
                     )
                     return
             pushed.append(checkout.kind)
-            self.state.record_run_events(bug_ids, f"pushed_{checkout.kind}", checkout.target_branch)
+            if checkout.delivery_mode == "push":
+                self.state.record_run_events(bug_ids, f"pushed_{checkout.kind}", checkout.target_branch)
 
         commits = [f"{checkout.kind}:{head_commit(checkout.worktree)}" for checkout in changed]
         commit_summary = " ".join(commits)
         self._record_progress()
-        self._comment_and_resolve(fixed, verdicts, commit_summary)
+        self._comment_and_resolve(fixed, verdicts, commit_summary, merge_requests)
         urls = ", ".join(bug_view_url(run.bug_id) for run in fixed)
         LOGGER.info("Worker pushed batch %s commits=%s urls=%s", batch_label, commit_summary, urls)
 
@@ -846,6 +866,7 @@ class Worker:
         fixed: List[RunRecord],
         verdicts: Dict[int, Dict[str, Any]],
         commit_summary: str,
+        merge_requests: Optional[List[str]] = None,
     ) -> None:
         for run in fixed:
             verdict = verdicts[run.bug_id]
@@ -854,6 +875,9 @@ class Worker:
                 "solution": _solution_text(verdict, commit_summary),
                 "commit_summary": commit_summary,
             }
+            if merge_requests:
+                payload["delivery_status"] = "awaiting_merge"
+                payload["solution"] += "\n修复代码已提 MR，待合并，尚未完成交付：\n" + "\n".join(merge_requests)
             self.state.set_writeback_payload(run.bug_id, json.dumps(payload, ensure_ascii=False))
             self._writeback_one(run, payload)
 
@@ -892,6 +916,12 @@ class Worker:
             LOGGER.error("Comment failed bug #%s after push: %s", run.bug_id, exc)
             return
 
+        if payload.get("delivery_status") == "awaiting_merge":
+            self.state.update_status(run.bug_id, "awaiting_merge", error="", commit_hash=commit_summary,
+                                     handled_once=True, completed=True)
+            self.state.record_run_event(run.bug_id, "awaiting_merge", payload["solution"])
+            return
+
         error = ""
         try:
             resolve_bug(self.settings.zentao_client_script, run.bug_id)
@@ -911,13 +941,14 @@ class Worker:
 
 
 class _Checkout:
-    def __init__(self, kind: str, repo_url: str, repo_cache: Path, worktree: Path, target_branch: str, baseline: str):
+    def __init__(self, kind: str, repo_url: str, repo_cache: Path, worktree: Path, target_branch: str, baseline: str, delivery_mode: str = "push"):
         self.kind = kind
         self.repo_url = repo_url
         self.repo_cache = repo_cache
         self.worktree = worktree
         self.target_branch = target_branch
         self.baseline = baseline
+        self.delivery_mode = delivery_mode
 
     @property
     def agent_committed(self) -> bool:
@@ -973,7 +1004,7 @@ def _still_running(state: StateStore, bug_id: int) -> bool:
 
 def _looks_like_non_fast_forward(error: str) -> bool:
     lowered = error.lower()
-    markers = ("non-fast-forward", "fetch first", "stale info", "rejected")
+    markers = ("non-fast-forward", "fetch first", "stale info")
     return any(marker in lowered for marker in markers)
 
 

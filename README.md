@@ -200,6 +200,7 @@ python3 -m zentao_auto_fixer.server
 | `fallbackAgent` | 可选后备引擎。当前仅在主引擎明确报告额度耗尽时切换；普通报错、超时或鉴权失败不会切换。每次后备启动也计入每日 AI 启动上限。 |
 | `app.repoUrl` / `app.targetBranch` | App 客户端仓库和目标分支。同一个仓库同时覆盖 Android 和 iOS。 |
 | `backend.repoUrl` / `backend.targetBranch` | 后端仓库和目标分支，可留空。留空时 AI 判定为后端问题的 Bug 会被打回给提 Bug 的人。 |
+| `app.deliveryMode` / `backend.deliveryMode` | 默认 `push`；`merge_request` 推送独立修复分支并通过 GitLab push options 创建 MR，目标为 `targetBranch`。当前 `im/cable` → `pre_release` 使用 MR。创建后显示“待合并”，禅道只备注 MR 链接，不标记解决；合并和验收由人工完成。 |
 | `repoUrl` / `targetBranch`（旧写法） | 顶层写法仍然兼容，等价于 `app`。 |
 | `onlyCodeBugs` | 是否只处理代码类 Bug，建议保持 `true`。 |
 | `maxBugsPerPoll` | 兼容旧配置；不再限制入队或合并批次，避免小 ID 被留到后续轮次。每次只修一个 Bug。 |
