@@ -191,3 +191,12 @@ class AutoMergeLifecycleTests(unittest.TestCase):
                 self.worker._check_merge_requests(self.run)
                 self.assertEqual(self.worker.state.update_status.call_args.args[1], 'merge_request_failed')
                 cls.return_value.enable_auto_merge.assert_not_called()
+
+    def test_disabled_project_never_reads_gitlab_or_starts_ai(self):
+        self.worker._project_for.return_value = SimpleNamespace(enabled=False)
+        with patch('zentao_auto_fixer.worker.GitLab') as client, \
+             patch('zentao_auto_fixer.worker.run_agent_batch_fix') as agent:
+            self.worker._check_merge_requests(self.run)
+            client.assert_not_called()
+            agent.assert_not_called()
+            self.worker.state.update_status.assert_not_called()
