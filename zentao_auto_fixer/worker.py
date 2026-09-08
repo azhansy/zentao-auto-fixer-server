@@ -889,6 +889,7 @@ class Worker:
                 payload["merge_requests"] = merge_requests
                 payload["verdict"] = verdict
                 payload["ci_attempts"] = 0
+                payload["ci_wait_started"] = time.time()
             self.state.set_writeback_payload(run.bug_id, json.dumps(payload, ensure_ascii=False))
             if merge_requests:
                 self.state.update_status(run.bug_id, "awaiting_merge", error="", commit_hash=commit_summary,
@@ -900,7 +901,13 @@ class Worker:
     def _check_merge_requests(self, run: RunRecord) -> None:
         """Existing poller checks CI without starting a model while nothing needs repair."""
         try:
+            project = self._project_for(run)
+            if project is None or not project.enabled:
+                return
             payload = json.loads(run.writeback_payload)
+            if "ci_wait_started" not in payload:
+                payload["ci_wait_started"] = time.time()
+                self.state.set_writeback_payload(run.bug_id, json.dumps(payload, ensure_ascii=False))
             requests = payload["merge_requests"]
             if not requests:
                 raise GitLabError("Missing MR delivery records")
@@ -920,6 +927,10 @@ class Worker:
                     raise GitLabError("MR closed without merging")
                 pipeline = mr.get("head_pipeline") or {}
                 if pipeline.get("sha") != item["sha"] or not jobs:
+                    ended_empty = pipeline.get("sha") == item["sha"] and pipeline.get("status") in {"success", "failed", "skipped", "canceled"}
+                    timed_out = time.time() - payload["ci_wait_started"] > self.settings.git_timeout_seconds
+                    if ended_empty or timed_out:
+                        raise GitLabError("No verifiable CI jobs for this MR head; pipeline missing or empty")
                     continue
                 if not required_jobs_present(jobs):
                     raise GitLabError("CI must contain mandatory lint, unit-test, build and integration jobs; auto merge was not enabled")
@@ -991,6 +1002,7 @@ class Worker:
                 push_head_to_branch(checkout.worktree, item["source"])
             item["sha"] = head_commit(checkout.worktree)
             payload["verdict"] = verdict
+            payload["ci_wait_started"] = time.time()
             commits = dict(value.split(":", 1) for value in payload["commit_summary"].split())
             commits[item["kind"]] = item["sha"]
             payload["commit_summary"] = " ".join(f"{kind}:{sha}" for kind, sha in commits.items())

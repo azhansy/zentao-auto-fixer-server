@@ -97,7 +97,8 @@ class AutoMergeLifecycleTests(unittest.TestCase):
         self.payload = {'merge_requests': [self.item], 'delivery_status': 'awaiting_merge',
                         'cause': 'cause', 'solution': 'solution', 'commit_summary': 'backend:abc'}
         self.run = SimpleNamespace(bug_id=1, commit_hash='backend:abc', writeback_payload=json.dumps(self.payload))
-        self.worker = Worker(SimpleNamespace(worker_count=3, max_bug_retries=2), Mock())
+        self.worker = Worker(SimpleNamespace(worker_count=3, max_bug_retries=2, git_timeout_seconds=30), Mock())
+        self.worker._project_for = Mock(return_value=SimpleNamespace(enabled=True))
         self.worker._writeback_one = Mock()
         self.worker._record_progress = Mock()
 
@@ -179,3 +180,14 @@ class AutoMergeLifecycleTests(unittest.TestCase):
             client.request.return_value = {'only_allow_merge_if_pipeline_succeeds': False}
             with self.assertRaises(GitLabError):
                 client.enable_auto_merge('abc')
+
+    def test_empty_finished_ci_or_timed_out_missing_ci_fails(self):
+        import time
+        with patch('zentao_auto_fixer.worker.GitLab') as cls:
+            for pipeline in ({'sha': 'abc', 'status': 'success'}, {}):
+                self.payload['ci_wait_started'] = time.time() - 60
+                self.run.writeback_payload = json.dumps(self.payload)
+                cls.return_value.inspect.return_value = ({'state': 'opened', 'head_pipeline': pipeline}, [])
+                self.worker._check_merge_requests(self.run)
+                self.assertEqual(self.worker.state.update_status.call_args.args[1], 'merge_request_failed')
+                cls.return_value.enable_auto_merge.assert_not_called()
