@@ -406,7 +406,7 @@ class StateStore:
         by_status = {str(row["status"]): int(row["count"]) for row in status_rows}
         pushed = by_status.get("pushed", 0)
         no_changes = by_status.get("no_changes", 0)
-        failed = by_status.get("failed", 0)
+        failed = by_status.get("failed", 0) + by_status.get("merge_request_failed", 0)
         sync_conflict = by_status.get("sync_conflict", 0)
         manual_required = by_status.get("manual_required", 0)
         unable_to_fix = by_status.get("unable_to_fix", 0)
@@ -428,13 +428,19 @@ class StateStore:
             "running": int(running["count"]) if running else 0,
         }
 
+    def awaiting_merge_bug_ids(self):
+        with self._lock, self._connect() as conn:
+            return [int(row[0]) for row in conn.execute(
+                "SELECT bug_id FROM bug_runs WHERE status = 'awaiting_merge' ORDER BY bug_id"
+            )]
+
     def current_problem_count(self) -> int:
         with self._lock, self._connect() as conn:
             row = conn.execute(
                 """
                 SELECT COUNT(*) AS count FROM bug_runs
                 WHERE status IN (
-                    'failed', 'sync_conflict', 'retry_exhausted',
+                    'failed', 'merge_request_failed', 'sync_conflict', 'retry_exhausted',
                     'writeback_failed', 'writeback_exhausted'
                 )
                 """

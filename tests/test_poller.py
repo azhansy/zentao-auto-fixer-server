@@ -91,7 +91,7 @@ class RetryPolicyTests(unittest.TestCase):
 
     def test_writeback_retry_also_uses_the_configured_ceiling(self):
         poller, state, worker = _ui_poller(process_ui_bugs=False)
-        state.get_run.return_value = SimpleNamespace(status="writeback_failed")
+        state.get_run.return_value = SimpleNamespace(status="writeback_failed", writeback_payload="")
         state.queue_writeback_retry.return_value = True
         poller._already_handled_in_zentao = mock.Mock(return_value="fresh")
 
@@ -165,6 +165,7 @@ def _ui_poller(*, process_ui_bugs: bool, max_bugs_per_poll: int = 3):
         max_bug_retries=4,
     )
     state = mock.Mock()
+    state.awaiting_merge_bug_ids.return_value = []
     state.get_run.return_value = None
     worker = mock.Mock()
     worker.dispatch_lock = threading.Lock()

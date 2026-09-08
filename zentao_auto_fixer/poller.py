@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -46,6 +47,8 @@ class Poller:
         projects = [project for project in self.settings.load_projects() if project.enabled]
         # ponytail: dispatch pauses during polling; publish a collected snapshot if polling latency grows.
         with self.worker.dispatch_lock:
+            for bug_id in self.state.awaiting_merge_bug_ids():
+                self.worker.enqueue(bug_id)
             for project in projects:
                 self._poll_project(project)
 
@@ -141,7 +144,11 @@ class Poller:
                             skipped_existing += 1
                         continue
                     if existing.status == "writeback_failed":
-                        zentao_state = self._already_handled_in_zentao(bug, project)
+                        try:
+                            mr_writeback = bool(json.loads(existing.writeback_payload or "{}").get("merge_requests"))
+                        except (ValueError, TypeError):
+                            mr_writeback = False
+                        zentao_state = "fresh" if mr_writeback else self._already_handled_in_zentao(bug, project)
                         if zentao_state == "fresh" and self.state.queue_writeback_retry(
                             bug.bug_id, max_retries=self.settings.max_bug_retries
                         ):

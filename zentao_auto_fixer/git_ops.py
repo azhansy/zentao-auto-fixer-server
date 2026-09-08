@@ -127,6 +127,7 @@ def reset_hard_clean(repo: Path, commit: str) -> None:
 
 def push_head_dry_run(repo: Path, target_branch: str) -> None:
     """Fail here rather than half-way through pushing several repositories."""
+    _guard_direct_push(repo, target_branch)
     run_git(["push", "--dry-run", "origin", f"HEAD:{target_branch}"], cwd=repo)
 
 
@@ -189,7 +190,14 @@ def push_branch(repo: Path, branch: str) -> None:
 
 
 def push_head_to_branch(repo: Path, target_branch: str) -> None:
+    _guard_direct_push(repo, target_branch)
     run_git(["push", "origin", f"HEAD:{target_branch}"], cwd=repo)
+
+
+def _guard_direct_push(repo: Path, target: str) -> None:
+    origin = run_git(["remote", "get-url", "origin"], cwd=repo)
+    if target.removeprefix("refs/heads/") == "pre_release" and re.search(r"[:/]im/cable(?:\.git)?/?$", origin):
+        raise GitError("im/cable pre_release 禁止直接 push，必须使用 feature 分支和 MR")
 
 
 def push_merge_request(repo: Path, source_branch: str, target_branch: str, title: str) -> str:
@@ -198,6 +206,7 @@ def push_merge_request(repo: Path, source_branch: str, target_branch: str, title
         "push", "origin", f"HEAD:refs/heads/{source_branch}",
         "-o", "merge_request.create", "-o", f"merge_request.target={target_branch}",
         "-o", f"merge_request.title={title.splitlines()[0]}",
+        "-o", "merge_request.remove_source_branch",
     ], cwd=repo)
     match = re.search(r"https?://[^\s<>]+/merge_requests/[0-9]+(?=\s|$)", output)
     if not match:
@@ -246,3 +255,7 @@ def _ensure_origin_url(repo: Path, repo_url: str, timeout: Optional[int]) -> Non
         return
     if current.strip() != repo_url:
         run_git(["remote", "set-url", "origin", repo_url], cwd=repo, timeout=timeout)
+
+
+def remote_branch_exists_for_url(repo_url: str, branch: str) -> bool:
+    return bool(run_git(["ls-remote", "--heads", repo_url, f"refs/heads/{branch}"], timeout=30))

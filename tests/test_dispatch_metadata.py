@@ -13,6 +13,7 @@ from zentao_auto_fixer.worker import Worker, _solution_text
 class DispatchAndMetadataTests(unittest.TestCase):
     def test_all_projects_are_collected_before_lowest_id_is_dispatched(self):
         state = mock.Mock()
+        state.awaiting_merge_bug_ids.return_value = []
         state.queued_bug_ids.return_value = []
         settings = SimpleNamespace(worker_count=3, load_projects=lambda: [
             SimpleNamespace(enabled=True, ids=[40, 20]),

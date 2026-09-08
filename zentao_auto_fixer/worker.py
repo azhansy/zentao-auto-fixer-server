@@ -36,8 +36,11 @@ from .git_ops import (
     rebase_onto_latest_remote,
     remove_worktree,
     repo_cache_name,
+    remote_branch_exists_for_url,
     reset_hard_clean,
+    run_git,
 )
+from .gitlab import GitLab, GitLabError, required_jobs_pass, required_jobs_present
 from .models import ProjectConfig, RunRecord, has_ui_tag, platforms_of
 from .state import StateStore
 from .zentao import (
@@ -123,6 +126,9 @@ class Worker:
     def _process_bug(self, bug_id: int) -> None:
         run = self.state.get_run(bug_id)
         if not run:
+            return
+        if run.status == "awaiting_merge":
+            self._check_merge_requests(run)
             return
         if run.status == "writeback_queued":
             self._retry_writeback(run)
@@ -639,15 +645,17 @@ class Worker:
                 break
 
         pushed: List[str] = []
-        merge_requests: List[str] = []
+        merge_requests: List[Dict[str, str]] = []
         for checkout in changed:
             while True:
                 try:
                     self.state.record_run_events(bug_ids, f"push_start_{checkout.kind}", checkout.target_branch)
                     if checkout.delivery_mode == "merge_request":
-                        source = f"zentao-fix/{bug_ids[0]}-{bug_ids[-1]}-{head_commit(checkout.worktree)[:12]}"
+                        source = f"feature/zentao-{bug_ids[0]}-{bug_ids[-1]}-{head_commit(checkout.worktree)[:12]}"
                         url = push_merge_request(checkout.worktree, source, checkout.target_branch, commit_message)
-                        merge_requests.append(url)
+                        merge_requests.append({"url": url, "source": source, "target": checkout.target_branch,
+                                               "repo_url": checkout.repo_url, "kind": checkout.kind,
+                                               "sha": head_commit(checkout.worktree)})
                         self.state.record_run_events(bug_ids, f"merge_request_created_{checkout.kind}", url)
                     else:
                         push_head_to_branch(checkout.worktree, checkout.target_branch)
@@ -866,7 +874,7 @@ class Worker:
         fixed: List[RunRecord],
         verdicts: Dict[int, Dict[str, Any]],
         commit_summary: str,
-        merge_requests: Optional[List[str]] = None,
+        merge_requests: Optional[List[Dict[str, str]]] = None,
     ) -> None:
         for run in fixed:
             verdict = verdicts[run.bug_id]
@@ -877,9 +885,127 @@ class Worker:
             }
             if merge_requests:
                 payload["delivery_status"] = "awaiting_merge"
-                payload["solution"] += "\n修复代码已提 MR，待合并，尚未完成交付：\n" + "\n".join(merge_requests)
+                payload["solution"] += "\n修复代码已提 MR，等待 CI 与自动合并，尚未完成交付：\n" + "\n".join(mr["url"] for mr in merge_requests)
+                payload["merge_requests"] = merge_requests
+                payload["verdict"] = verdict
+                payload["ci_attempts"] = 0
             self.state.set_writeback_payload(run.bug_id, json.dumps(payload, ensure_ascii=False))
-            self._writeback_one(run, payload)
+            if merge_requests:
+                self.state.update_status(run.bug_id, "awaiting_merge", error="", commit_hash=commit_summary,
+                                         handled_once=True, completed=True)
+                self.state.record_run_event(run.bug_id, "awaiting_merge", payload["solution"])
+            else:
+                self._writeback_one(run, payload)
+
+    def _check_merge_requests(self, run: RunRecord) -> None:
+        """Existing poller checks CI without starting a model while nothing needs repair."""
+        try:
+            payload = json.loads(run.writeback_payload)
+            requests = payload["merge_requests"]
+            if not requests:
+                raise GitLabError("Missing MR delivery records")
+            all_merged = True
+            for item in requests:
+                client = GitLab(item["url"])
+                mr, jobs = client.inspect(item["sha"], item["target"])
+                if mr.get("state") == "merged":
+                    if not required_jobs_pass(jobs) or (mr.get("head_pipeline") or {}).get("status") != "success":
+                        raise GitLabError("MR merged without verified required CI jobs on the recorded head")
+                    # GitLab removes the feature branch as part of the merge; verify the result.
+                    if remote_branch_exists_for_url(item["repo_url"], item["source"]):
+                        raise GitLabError("MR merged but its feature branch still exists")
+                    continue
+                all_merged = False
+                if mr.get("state") != "opened":
+                    raise GitLabError("MR closed without merging")
+                pipeline = mr.get("head_pipeline") or {}
+                if pipeline.get("sha") != item["sha"] or not jobs:
+                    continue
+                if not required_jobs_present(jobs):
+                    raise GitLabError("CI must contain mandatory lint, unit-test, build and integration jobs; auto merge was not enabled")
+                if pipeline.get("status") == "failed":
+                    self._repair_merge_request(run, payload, item, client.failed_logs(jobs))
+                    return
+                if pipeline.get("status") in {"canceled", "skipped", "manual"}:
+                    raise GitLabError("CI was canceled, skipped or needs manual action; automatic delivery stopped")
+                if any(job.get("status") in {"manual", "skipped"} for job in jobs):
+                    raise GitLabError("CI contains manual or skipped jobs; auto merge was not enabled")
+                if not mr.get("merge_when_pipeline_succeeds") and not mr.get("auto_merge_enabled"):
+                    client.enable_auto_merge(item["sha"])
+                    self.state.record_run_event(run.bug_id, "auto_merge_enabled", item["url"])
+            if all_merged:
+                payload.pop("delivery_status", None)
+                payload["solution"] += "\n必需 CI 全部通过，MR 已合并，feature 源分支已删除。"
+                self.state.set_writeback_payload(run.bug_id, json.dumps(payload, ensure_ascii=False))
+                self._writeback_one(run, payload)
+                self._record_progress()
+        except (GitLabError, GitError, AgentError, KeyError, ValueError, OSError) as exc:
+            self._fail_batch([run], "merge_request_failed", str(exc), run.commit_hash)
+
+    def _repair_merge_request(self, run, payload, item, failure):
+        attempts = payload.get("ci_attempts", 0)
+        if attempts >= self.settings.max_bug_retries:
+            raise GitLabError("CI repair attempt limit reached; MR remains unmerged")
+        if not self._claim_agent_budget():
+            self.state.record_run_event(run.bug_id, "ci_budget_exhausted", self._agent_budget_block_reason())
+            return
+        project = self._project_for(run)
+        if project is None:
+            raise GitLabError("Project config missing for CI repair")
+        payload["ci_attempts"] = attempts + 1
+        self.state.set_writeback_payload(run.bug_id, json.dumps(payload, ensure_ascii=False))
+        checkouts = {}
+        label = f"#{run.bug_id} CI {attempts + 1}"
+        try:
+            # Fetch the existing feature head, so every retry updates the same MR without force push.
+            checkouts[item["kind"]] = self._prepare_checkout(
+                [run.bug_id], item["kind"], item["repo_url"], item["source"], label)
+            checkout = checkouts[item["kind"]]
+            if checkout.baseline != item["sha"]:
+                raise GitLabError("Feature branch changed outside this task")
+            if "app" not in checkouts:
+                checkouts["app"] = self._prepare_checkout([run.bug_id], "app", project.repo_url, project.target_branch, label)
+            path = self.settings.logs_dir / f"bug-{run.bug_id}-ci-{attempts + 1}"
+            self.state.record_run_event(run.bug_id, "ci_repair_start", item["url"])
+            verdicts = run_agent_batch_fix(
+                project.agent, self.settings.agent_bin(project.agent), self.settings.zentao_client_script,
+                checkouts["app"].worktree,
+                checkouts["backend"].worktree if "backend" in checkouts else None,
+                [(run.bug_id, run.title)], path.with_suffix(".json"), path.with_suffix(".log"),
+                timeout_seconds=self.settings.codex_timeout_seconds,
+                allow_full_xcodebuild=project.allow_full_xcodebuild, ci_context=failure,
+            )
+            verdict = verdicts[run.bug_id]
+            if verdict["decision"] != "fixed" or not checkout.has_work():
+                raise GitLabError("Agent did not produce a verified CI repair")
+            if any(other.has_work() for other in checkouts.values() if other is not checkout):
+                raise GitLabError("CI repair changed a repository outside this MR")
+            # The repair agent cannot turn a red pipeline green by changing the gate itself.
+            files = run_git(["diff", "--name-only", checkout.baseline], cwd=checkout.worktree).splitlines()
+            if any(f == ".gitlab-ci.yml" or f.startswith((".gitlab/", "scripts/ci")) for f in files):
+                raise GitLabError("CI repair modified pipeline gates; independent review required")
+            if has_changes(checkout.worktree):
+                commit_all(checkout.worktree, _commit_message([run], verdicts),
+                           self.settings.git_author_name, self.settings.git_author_email)
+            with self._lock_for_repo(checkout.repo_url):
+                push_head_to_branch(checkout.worktree, item["source"])
+            item["sha"] = head_commit(checkout.worktree)
+            payload["verdict"] = verdict
+            commits = dict(value.split(":", 1) for value in payload["commit_summary"].split())
+            commits[item["kind"]] = item["sha"]
+            payload["commit_summary"] = " ".join(f"{kind}:{sha}" for kind, sha in commits.items())
+            payload["solution"] = _solution_text(verdict, payload["commit_summary"]) + "\n等待 MR CI 和自动合并：" + item["url"]
+            self.state.set_writeback_payload(run.bug_id, json.dumps(payload, ensure_ascii=False))
+            self.state.update_status(run.bug_id, "awaiting_merge", commit_hash=payload["commit_summary"], error="")
+            self.state.record_run_event(run.bug_id, "ci_repair_pushed", item["sha"])
+        except Exception:
+            for checkout in checkouts.values():
+                self._save_conflict_patch(checkout, label)
+            raise
+        finally:
+            for checkout in checkouts.values():
+                with self._lock_for_repo(checkout.repo_url):
+                    remove_worktree(checkout.repo_cache, checkout.worktree)
 
     def _retry_writeback(self, run: RunRecord) -> None:
         try:
