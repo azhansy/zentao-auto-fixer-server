@@ -72,6 +72,15 @@ class GitLab:
         return self.request(self.mr_path + '/merge', 'PUT',
                             {'sha': sha, 'auto_merge': True, 'should_remove_source_branch': True})
 
+    def source_branch_exists(self, branch):
+        try:
+            self.request(self.project + '/repository/branches/' + quote(branch, safe=''))
+            return True
+        except GitLabError as exc:
+            if isinstance(exc.__cause__, HTTPError) and exc.__cause__.code == 404:
+                return False
+            raise
+
     def failed_logs(self, jobs):
         logs = []
         for job in jobs:

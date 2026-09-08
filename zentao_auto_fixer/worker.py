@@ -36,7 +36,6 @@ from .git_ops import (
     rebase_onto_latest_remote,
     remove_worktree,
     repo_cache_name,
-    remote_branch_exists_for_url,
     reset_hard_clean,
     run_git,
 )
@@ -919,7 +918,7 @@ class Worker:
                     if not required_jobs_pass(jobs) or (mr.get("head_pipeline") or {}).get("status") != "success":
                         raise GitLabError("MR merged without verified required CI jobs on the recorded head")
                     # GitLab removes the feature branch as part of the merge; verify the result.
-                    if remote_branch_exists_for_url(item["repo_url"], item["source"]):
+                    if client.source_branch_exists(item["source"]):
                         raise GitLabError("MR merged but its feature branch still exists")
                     continue
                 all_merged = False

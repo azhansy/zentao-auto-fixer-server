@@ -103,8 +103,8 @@ class AutoMergeLifecycleTests(unittest.TestCase):
         self.worker._record_progress = Mock()
 
     def test_only_complete_required_jobs_on_merged_head_can_resolve(self):
-        with patch('zentao_auto_fixer.worker.GitLab') as cls, \
-             patch('zentao_auto_fixer.worker.remote_branch_exists_for_url', return_value=False):
+        with patch('zentao_auto_fixer.worker.GitLab') as cls:
+            cls.return_value.source_branch_exists.return_value = False
             cls.return_value.inspect.return_value = ({'state': 'merged', 'head_pipeline': {'status': 'success'}}, self.jobs)
             self.worker._check_merge_requests(self.run)
             payload = self.worker._writeback_one.call_args.args[1]
@@ -200,3 +200,20 @@ class AutoMergeLifecycleTests(unittest.TestCase):
             client.assert_not_called()
             agent.assert_not_called()
             self.worker.state.update_status.assert_not_called()
+
+    def test_branch_cleanup_distinguishes_missing_from_api_failure(self):
+        from urllib.error import HTTPError
+        from zentao_auto_fixer.gitlab import GitLab, GitLabError
+        client = object.__new__(GitLab)
+        client.project = '/projects/im%2Fcable'
+        client.request = Mock(return_value={'name': 'feature/one'})
+        self.assertTrue(client.source_branch_exists('feature/one'))
+        for status in (404, 403):
+            error = GitLabError('API failure')
+            error.__cause__ = HTTPError('https://gitlab.example', status, 'error', None, None)
+            client.request.side_effect = error
+            if status == 404:
+                self.assertFalse(client.source_branch_exists('feature/one'))
+            else:
+                with self.assertRaises(GitLabError):
+                    client.source_branch_exists('feature/one')

@@ -255,7 +255,3 @@ def _ensure_origin_url(repo: Path, repo_url: str, timeout: Optional[int]) -> Non
         return
     if current.strip() != repo_url:
         run_git(["remote", "set-url", "origin", repo_url], cwd=repo, timeout=timeout)
-
-
-def remote_branch_exists_for_url(repo_url: str, branch: str) -> bool:
-    return bool(run_git(["ls-remote", "--heads", repo_url, f"refs/heads/{branch}"], timeout=30))
