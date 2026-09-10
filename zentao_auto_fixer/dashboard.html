@@ -63,6 +63,7 @@
     .resets td.err { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .reset-btn { color: var(--text); background: #7c2d12; border: 1px solid #9a3412; border-radius: 7px; padding: 5px 12px; cursor: pointer; font-weight: 650; }
     .reset-btn:disabled { opacity: .5; cursor: default; }
+    .reset-tools { display: flex; align-items: center; gap: 12px; }
     .empty { padding: 28px 16px; text-align: center; color: var(--muted); }
     .pagination { padding: 10px 16px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; align-items: center; gap: 10px; }
     .pagination button { color: var(--text); background: #0f172a; border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; cursor: pointer; }
@@ -136,7 +137,10 @@
   <section class="panel resets">
     <div class="panel-head">
       <h2>非成功任务</h2>
-      <span class="muted">重置：清零重试次数并立即重新入队处理</span>
+      <div class="reset-tools">
+        <span class="muted">重置：清零重试次数并立即重新入队处理</span>
+        <button id="reset-all" type="button" class="reset-btn">全部重置</button>
+      </div>
     </div>
     <div class="table-wrap">
       <table>
@@ -384,6 +388,29 @@
   byId("filter").addEventListener("change", () => { page = 1; renderRuns(); });
   byId("previous-page").addEventListener("click", () => { page--; renderRuns(); });
   byId("next-page").addEventListener("click", () => { page++; renderRuns(); });
+  byId("reset-all").addEventListener("click", async () => {
+    const button = byId("reset-all");
+    if (!confirm("确定重置所有非成功任务？\n禅道里已处理过的会自动从列表移除。")) return;
+    button.disabled = true;
+    button.textContent = "重置中…";
+    try {
+      const response = await fetch("/runs/resurrect-all", { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      await refresh();
+      const parts = [
+        `已重置 ${data.resurrected.length} 个并重新入队`,
+        `已移除处理过的 ${data.removed.length} 个`,
+      ];
+      if (data.skipped.length) parts.push(`跳过 ${data.skipped.length} 个（禅道读取失败，保留在列表）`);
+      alert(parts.join("\n"));
+    } catch (error) {
+      alert(`全部重置失败：${error.message}`);
+    } finally {
+      button.disabled = false;
+      button.textContent = "全部重置";
+    }
+  });
   refresh();
   setInterval(refresh, 5000);
 </script>

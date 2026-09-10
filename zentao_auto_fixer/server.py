@@ -12,10 +12,11 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from .config import Settings
+from .models import RESURRECTABLE_STATUSES
 from .poller import Poller
 from .state import StateStore, utc_now
 from .worker import Worker
-from .zentao import bug_view_url
+from .zentao import ZenTaoPollError, bug_is_still_actionable, bug_view_url
 
 
 LOGGER = logging.getLogger("zentao_auto_fixer")
@@ -124,6 +125,9 @@ def make_handler(app: App):
 
         def do_POST(self) -> None:
             path, _ = _path_and_query(self.path)
+            if path == "/runs/resurrect-all":
+                self._resurrect_all()
+                return
             if path.startswith("/runs/"):
                 rest = path.removeprefix("/runs/")
                 if not rest.endswith("/resurrect"):
@@ -154,6 +158,39 @@ def make_handler(app: App):
                 )
                 return
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+
+        def _resurrect_all(self) -> None:
+            """Bulk reset: requeue every non-successful run, dropping ones already handled in ZenTao."""
+            candidates = [
+                int(run["bug_id"])
+                for run in app.state.list_runs(500)
+                if run["status"] in RESURRECTABLE_STATUSES
+            ]
+            resurrected, removed, skipped = [], [], []
+            for bug_id in candidates:
+                try:
+                    actionable, reason = bug_is_still_actionable(app.settings.zentao_client_script, bug_id)
+                except ZenTaoPollError as exc:
+                    LOGGER.warning("Could not re-check bug #%s before bulk reset: %s", bug_id, exc)
+                    skipped.append(bug_id)
+                    continue
+                if not actionable:
+                    app.state.update_status(bug_id, "handled_in_zentao", error=reason, completed=True)
+                    app.state.record_run_event(bug_id, "removed_from_resettable", reason)
+                    removed.append(bug_id)
+                    continue
+                if app.state.resurrect_for_retry(bug_id):
+                    app.state.record_run_event(
+                        bug_id, "resurrected", "Bulk reset from the dashboard; requeued for another repair attempt."
+                    )
+                    app.worker.enqueue(bug_id)
+                    resurrected.append(bug_id)
+            if resurrected:
+                app.state.clear_no_progress_fuses()
+            self._json(
+                HTTPStatus.OK,
+                {"ok": True, "resurrected": resurrected, "removed": removed, "skipped": skipped},
+            )
 
         def log_message(self, fmt: str, *args: Any) -> None:
             LOGGER.info("%s - %s", self.address_string(), fmt % args)

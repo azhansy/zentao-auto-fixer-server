@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from zentao_auto_fixer.server import make_handler
+from zentao_auto_fixer.zentao import ZenTaoPollError
 
 
 def get(app, path):
@@ -132,6 +133,74 @@ class ResurrectEndpointTests(unittest.TestCase):
 
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(body), {"error": "bug_id must be an integer"})
+
+
+class ResurrectAllEndpointTests(unittest.TestCase):
+    def _app(self):
+        calls = []
+
+        def update_status(bug_id, status, **kwargs):
+            calls.append(("update", bug_id, status, kwargs))
+
+        return (
+            SimpleNamespace(
+                settings=SimpleNamespace(zentao_client_script="/tmp/zentao_client.py"),
+                state=SimpleNamespace(
+                    list_runs=lambda _limit: [
+                        {"bug_id": 7472, "status": "unable_to_fix"},
+                        {"bug_id": 7565, "status": "skipped_stale"},
+                        {"bug_id": 7694, "status": "retry_exhausted"},
+                        {"bug_id": 7693, "status": "pushed"},
+                    ],
+                    update_status=update_status,
+                    record_run_event=lambda bug_id, event, message: calls.append(("event", bug_id, event)),
+                    resurrect_for_retry=lambda bug_id: True,
+                    clear_no_progress_fuses=lambda: 3,
+                ),
+                worker=SimpleNamespace(enqueue=lambda bug_id: calls.append(("enqueue", bug_id))),
+            ),
+            calls,
+        )
+
+    def test_resurrect_all_requeues_fresh_and_removes_handled(self):
+        app, calls = self._app()
+        with patch(
+            "zentao_auto_fixer.server.bug_is_still_actionable",
+            side_effect=[(True, ""), (False, "ZenTao status is now 'closed', not active"), (True, "")],
+        ):
+            status, _headers, body = post(app, "/runs/resurrect-all")
+
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["resurrected"], [7472, 7694])
+        self.assertEqual(payload["removed"], [7565])
+        self.assertEqual(payload["skipped"], [])
+        self.assertIn(("update", 7565, "handled_in_zentao", {"error": "ZenTao status is now 'closed', not active", "completed": True}), calls)
+        self.assertIn(("enqueue", 7472), calls)
+        self.assertIn(("enqueue", 7694), calls)
+        # 成功的 run 不在候选里，永远不会被碰。
+        self.assertFalse(any("7693" in str(item) for item in calls))
+
+    def test_resurrect_all_skips_unreadable_bugs(self):
+        app, calls = self._app()
+        with patch(
+            "zentao_auto_fixer.server.bug_is_still_actionable",
+            side_effect=[
+                ZenTaoPollError("ZenTao HTTP 403"),
+                ZenTaoPollError("ZenTao HTTP 403"),
+                ZenTaoPollError("ZenTao HTTP 403"),
+            ],
+        ):
+            status, _headers, body = post(app, "/runs/resurrect-all")
+
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["skipped"], [7472, 7565, 7694])
+        self.assertEqual(payload["resurrected"], [])
+        self.assertEqual(payload["removed"], [])
+        # 禅道读取失败时保留原状态：不入队、不标记已处理、不清熔断。
+        self.assertFalse(any(isinstance(item, tuple) and item[0] == "enqueue" for item in calls))
+        self.assertFalse(any(isinstance(item, tuple) and item[0] == "update" for item in calls))
 
 
 if __name__ == "__main__":
