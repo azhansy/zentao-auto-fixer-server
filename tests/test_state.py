@@ -83,6 +83,30 @@ class StateTests(unittest.TestCase):
             self.assertFalse(store.resurrect_retry_exhausted(1))
             self.assertEqual(store.get_run(1).status, "queued")
 
+    def test_resurrect_unable_to_fix_gives_a_fresh_repair_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            bug = _bug(1)
+            project = _project()
+            store.enqueue_first_run(bug, project)
+            store.mark_unable_to_fix(1, "无法定位到可修的代码缺陷。")
+
+            self.assertTrue(store.resurrect_unable_to_fix(1))
+            run = store.get_run(1)
+            self.assertEqual(run.status, "failed")
+            self.assertEqual(run.retry_count, 0)
+
+            # 恢复正常的可重试状态之后，正常的 requeue 流程要能重新捡起它。
+            self.assertTrue(store.requeue_retryable(bug, project))
+            self.assertEqual(store.get_run(1).status, "queued")
+
+    def test_resurrect_unable_to_fix_ignores_other_statuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            store.enqueue_first_run(_bug(1), _project())
+            self.assertFalse(store.resurrect_unable_to_fix(1))
+            self.assertEqual(store.get_run(1).status, "queued")
+
     def test_writeback_retry_keeps_the_saved_success_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = StateStore(Path(tmp) / "state.sqlite3")

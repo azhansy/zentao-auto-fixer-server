@@ -203,6 +203,22 @@ class StateStore:
             )
             return True
 
+    def _resurrect(self, bug_id: int, from_statuses: set, message: str) -> bool:
+        now = utc_now()
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT status FROM bug_runs WHERE bug_id = ?", (bug_id,)).fetchone()
+            if not row or row["status"] not in from_statuses:
+                return False
+            conn.execute(
+                """
+                UPDATE bug_runs
+                SET status = 'failed', retry_count = 0, error = ?, updated_at = ?, completed_at = NULL
+                WHERE bug_id = ?
+                """,
+                (message, now, bug_id),
+            )
+            return True
+
     def resurrect_retry_exhausted(self, bug_id: int) -> bool:
         """Give a bug stuck in retry_exhausted/writeback_exhausted a fresh retry budget.
 
@@ -211,20 +227,26 @@ class StateStore:
         by hand. Reset it to 'failed' (a RETRYABLE_STATUS) with retry_count back to 0 so
         the next poll picks it up like a normal transient failure.
         """
-        now = utc_now()
-        with self._lock, self._connect() as conn:
-            row = conn.execute("SELECT status FROM bug_runs WHERE bug_id = ?", (bug_id,)).fetchone()
-            if not row or row["status"] not in {"retry_exhausted", "writeback_exhausted"}:
-                return False
-            conn.execute(
-                """
-                UPDATE bug_runs
-                SET status = 'failed', retry_count = 0, error = ?, updated_at = ?, completed_at = NULL
-                WHERE bug_id = ?
-                """,
-                ("Resurrected after a retry budget increase; will be retried on the next poll.", now, bug_id),
-            )
-            return True
+        return self._resurrect(
+            bug_id,
+            {"retry_exhausted", "writeback_exhausted"},
+            "Resurrected after a retry budget increase; will be retried on the next poll.",
+        )
+
+    def resurrect_unable_to_fix(self, bug_id: int) -> bool:
+        """Give a bug rejected as unable_to_fix another full repair attempt.
+
+        unable_to_fix is terminal by design (no code in poller.py ever requeues it),
+        so a "can't locate the problem" verdict sticks forever even after the bug
+        report gains the missing info. Reset it to 'failed' (a RETRYABLE_STATUS) with
+        retry_count back to 0 so the next poll picks it up like a normal transient
+        failure.
+        """
+        return self._resurrect(
+            bug_id,
+            {"unable_to_fix"},
+            "Resurrected from unable_to_fix; will be re-triaged on the next poll.",
+        )
 
     def requeue_skipped_ui(self, bug: BugCandidate, project: ProjectConfig) -> bool:
         """Requeue a UI-tagged bug after processUiBugs is explicitly enabled."""
