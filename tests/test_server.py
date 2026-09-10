@@ -10,12 +10,20 @@ from zentao_auto_fixer.server import make_handler
 
 
 def get(app, path):
+    return request(app, "GET", path)
+
+
+def post(app, path):
+    return request(app, "POST", path)
+
+
+def request(app, method, path):
     server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app))
     thread = threading.Thread(target=server.serve_forever)
     thread.start()
     try:
         connection = http.client.HTTPConnection(*server.server_address, timeout=2)
-        connection.request("GET", path)
+        connection.request(method, path)
         response = connection.getresponse()
         return response.status, dict(response.getheaders()), response.read()
     finally:
@@ -73,6 +81,57 @@ class DashboardTests(unittest.TestCase):
             },
         )
         self.assertEqual(seen, [500])
+
+
+class ResurrectEndpointTests(unittest.TestCase):
+    def test_resurrect_requeues_clears_fuses_and_enqueues(self):
+        calls = []
+
+        def record_event(bug_id, event, message):
+            calls.append(("event", bug_id, event, message))
+
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                get_run=lambda _bug_id: SimpleNamespace(status="unable_to_fix"),
+                resurrect_for_retry=lambda _bug_id: True,
+                clear_no_progress_fuses=lambda: 2,
+                record_run_event=record_event,
+            ),
+            worker=SimpleNamespace(enqueue=lambda bug_id: calls.append(("enqueue", bug_id))),
+        )
+        status, _headers, body = post(app, "/runs/7687/resurrect")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body),
+            {"ok": True, "bug_id": 7687, "status": "queued", "cleared_fuses": 2},
+        )
+        self.assertEqual(
+            calls,
+            [
+                ("event", 7687, "resurrected", "Manually reset from the dashboard; requeued for another repair attempt."),
+                ("enqueue", 7687),
+            ],
+        )
+
+    def test_resurrect_rejects_non_resettable_runs(self):
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                get_run=lambda _bug_id: SimpleNamespace(status="pushed"),
+                resurrect_for_retry=lambda _bug_id: False,
+            ),
+            worker=SimpleNamespace(),
+        )
+        status, _headers, body = post(app, "/runs/7693/resurrect")
+
+        self.assertEqual(status, 400)
+        self.assertIn("only non-successful runs can be reset", json.loads(body)["error"])
+
+    def test_resurrect_rejects_non_integer_bug_id(self):
+        status, _headers, body = post(SimpleNamespace(), "/runs/abc/resurrect")
+
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body), {"error": "bug_id must be an integer"})
 
 
 if __name__ == "__main__":

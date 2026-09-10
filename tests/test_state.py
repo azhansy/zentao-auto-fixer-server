@@ -107,6 +107,50 @@ class StateTests(unittest.TestCase):
             self.assertFalse(store.resurrect_unable_to_fix(1))
             self.assertEqual(store.get_run(1).status, "queued")
 
+    def test_resurrect_for_retry_requeues_terminal_and_retryable_statuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            store.enqueue_first_run(_bug(1), _project())
+            store.update_status(1, "retry_exhausted", error="boom", completed=True)
+
+            self.assertTrue(store.resurrect_for_retry(1))
+            run = store.get_run(1)
+            self.assertEqual(run.status, "queued")
+            self.assertEqual(run.retry_count, 0)
+            self.assertEqual(run.error, "")
+            self.assertEqual(run.event_action, "manual_retry")
+
+            # 普通的可重试失败状态也能一键重置。
+            store.update_status(1, "failed", error="boom", completed=True)
+            self.assertTrue(store.resurrect_for_retry(1))
+            self.assertEqual(store.get_run(1).status, "queued")
+
+    def test_resurrect_for_retry_ignores_successful_or_active_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            store.enqueue_first_run(_bug(1), _project())
+            store.update_status(1, "pushed", completed=True)
+            self.assertFalse(store.resurrect_for_retry(1))
+            self.assertEqual(store.get_run(1).status, "pushed")
+
+            store.update_status(1, "queued")
+            self.assertFalse(store.resurrect_for_retry(1))
+
+    def test_clear_no_progress_fuses_resets_today_counters_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            store.set_daily_counter("consecutive_no_progress:auto-fixer-worker-1", "2026-09-10", 3)
+            store.set_daily_counter("consecutive_no_progress:auto-fixer-worker-2", "2026-09-10", 3)
+            store.set_daily_counter("consecutive_no_progress:auto-fixer-worker-1", "2026-09-09", 3)
+            store.set_daily_counter("agent_runs", "2026-09-10", 17)
+
+            self.assertEqual(store.clear_no_progress_fuses("2026-09-10"), 2)
+            self.assertEqual(store.daily_counter_value("consecutive_no_progress:auto-fixer-worker-1", "2026-09-10"), 0)
+            self.assertEqual(store.daily_counter_value("consecutive_no_progress:auto-fixer-worker-2", "2026-09-10"), 0)
+            # 昨天的计数和无关计数器不受影响。
+            self.assertEqual(store.daily_counter_value("consecutive_no_progress:auto-fixer-worker-1", "2026-09-09"), 3)
+            self.assertEqual(store.daily_counter_value("agent_runs", "2026-09-10"), 17)
+
     def test_writeback_retry_keeps_the_saved_success_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = StateStore(Path(tmp) / "state.sqlite3")

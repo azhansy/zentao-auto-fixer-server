@@ -19,6 +19,18 @@ TERMINAL_STATUSES = {
     "skipped_ui",
 }
 RETRYABLE_STATUSES = {"failed", "sync_conflict", "skipped_stale", "manual_required"}
+# Non-successful statuses the dashboard "重置" button may reset back into the queue.
+RESURRECTABLE_STATUSES = {
+    "retry_exhausted",
+    "writeback_exhausted",
+    "unable_to_fix",
+    "failed",
+    "sync_conflict",
+    "manual_required",
+    "skipped_stale",
+    "merge_request_failed",
+    "no_changes",
+}
 # Any ZenTao comment written by this service or the skill carries this marker in its footer.
 AI_COMMENT_MARKER = "zentao-bug-fixer"
 AUTO_FIXED_STATUSES = {"pushed"}

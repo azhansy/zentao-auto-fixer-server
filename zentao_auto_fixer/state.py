@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .models import RETRYABLE_STATUSES, BugCandidate, ProjectConfig, RunRecord
+from .models import RESURRECTABLE_STATUSES, RETRYABLE_STATUSES, BugCandidate, ProjectConfig, RunRecord
 from .zentao import bug_view_url
 
 
@@ -247,6 +247,47 @@ class StateStore:
             {"unable_to_fix"},
             "Resurrected from unable_to_fix; will be re-triaged on the next poll.",
         )
+
+    def resurrect_for_retry(self, bug_id: int) -> bool:
+        """Reset a non-successful bug straight back into the queue with a fresh retry budget.
+
+        Covers both the terminal dead-ends (retry_exhausted / writeback_exhausted /
+        unable_to_fix, which poller.py never requeues) and plain retryable failures.
+        Clears retry_count and error, then marks the run queued with event_action
+        'manual_retry' so the worker re-processes it immediately and ignores any
+        previous AI comment in ZenTao.
+        """
+        now = utc_now()
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT status FROM bug_runs WHERE bug_id = ?", (bug_id,)).fetchone()
+            if not row or row["status"] not in RESURRECTABLE_STATUSES:
+                return False
+            conn.execute(
+                """
+                UPDATE bug_runs
+                SET status = 'queued', retry_count = 0, error = '', event_action = 'manual_retry',
+                    updated_at = ?, completed_at = NULL
+                WHERE bug_id = ?
+                """,
+                (now, bug_id),
+            )
+            return True
+
+    def clear_no_progress_fuses(self, day: Optional[str] = None) -> int:
+        """Clear today's no-progress counters so a manually reset bug can actually run.
+
+        The worker pauses new batches after three consecutive AI runs without a
+        pushed fix; a manual reset from the dashboard means the owner wants another
+        attempt now, so the fuse should not keep blocking it until tomorrow.
+        """
+        day = day or utc_now()[:10]
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE daily_counters SET value = 0 "
+                "WHERE counter_name LIKE 'consecutive_no_progress%' AND day = ?",
+                (day,),
+            )
+            return cur.rowcount
 
     def requeue_skipped_ui(self, bug: BugCandidate, project: ProjectConfig) -> bool:
         """Requeue a UI-tagged bug after processUiBugs is explicitly enabled."""

@@ -122,6 +122,39 @@ def make_handler(app: App):
                 return
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
+        def do_POST(self) -> None:
+            path, _ = _path_and_query(self.path)
+            if path.startswith("/runs/"):
+                rest = path.removeprefix("/runs/")
+                if not rest.endswith("/resurrect"):
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                    return
+                bug_id_text = rest.removesuffix("/resurrect").rstrip("/")
+                try:
+                    bug_id = int(bug_id_text)
+                except ValueError:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "bug_id must be an integer"})
+                    return
+                run = app.state.get_run(bug_id)
+                if not app.state.resurrect_for_retry(bug_id):
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": f"bug #{bug_id} is {run.status if run else 'missing'}; "
+                                  "only non-successful runs can be reset"},
+                    )
+                    return
+                cleared_fuses = app.state.clear_no_progress_fuses()
+                app.state.record_run_event(
+                    bug_id, "resurrected", "Manually reset from the dashboard; requeued for another repair attempt."
+                )
+                app.worker.enqueue(bug_id)
+                self._json(
+                    HTTPStatus.OK,
+                    {"ok": True, "bug_id": bug_id, "status": "queued", "cleared_fuses": cleared_fuses},
+                )
+                return
+            self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+
         def log_message(self, fmt: str, *args: Any) -> None:
             LOGGER.info("%s - %s", self.address_string(), fmt % args)
 

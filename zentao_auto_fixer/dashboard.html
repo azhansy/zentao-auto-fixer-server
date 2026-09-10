@@ -59,7 +59,10 @@
     .timeline li::before { content: ""; position: absolute; left: -20px; top: 5px; width: 8px; height: 8px; border-radius: 50%; background: var(--violet); }
     .timeline time { display: block; color: var(--muted); font-size: 12px; }
     .timeline p { margin: 3px 0 0; color: #cbd5e1; overflow-wrap: anywhere; }
-    .polls { margin-top: 16px; }
+    .polls, .resets { margin-top: 16px; }
+    .resets td.err { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .reset-btn { color: var(--text); background: #7c2d12; border: 1px solid #9a3412; border-radius: 7px; padding: 5px 12px; cursor: pointer; font-weight: 650; }
+    .reset-btn:disabled { opacity: .5; cursor: default; }
     .empty { padding: 28px 16px; text-align: center; color: var(--muted); }
     .pagination { padding: 10px 16px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; align-items: center; gap: 10px; }
     .pagination button { color: var(--text); background: #0f172a; border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; cursor: pointer; }
@@ -106,6 +109,7 @@
             <option value="running">进行中</option>
             <option value="queued">排队</option>
             <option value="other">其他终态</option>
+            <option value="resettable">非成功（可重置）</option>
           </select>
         </label>
       </div>
@@ -129,6 +133,20 @@
     </aside>
   </div>
 
+  <section class="panel resets">
+    <div class="panel-head">
+      <h2>非成功任务</h2>
+      <span class="muted">重置：清零重试次数并立即重新入队处理</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Bug</th><th>标题</th><th>项目</th><th>状态</th><th>状态时间</th><th>错误</th><th>操作</th></tr></thead>
+        <tbody id="resettable-runs"></tbody>
+      </table>
+      <div id="resettable-empty" class="empty" hidden>当前没有需要重置的非成功任务</div>
+    </div>
+  </section>
+
   <section class="panel polls">
     <div class="panel-head"><h2>最近轮询流水</h2></div>
     <div class="table-wrap">
@@ -150,6 +168,7 @@
     rejected_to_reporter: "旧版退回", no_changes: "无代码改动"
   };
   const failureStatuses = new Set(["merge_request_failed", "failed", "sync_conflict", "retry_exhausted", "writeback_failed", "writeback_exhausted"]);
+  const resettableStatuses = new Set(["retry_exhausted", "writeback_exhausted", "unable_to_fix", "failed", "sync_conflict", "manual_required", "skipped_stale", "merge_request_failed", "no_changes"]);
   const queuedStatuses = new Set(["queued", "writeback_queued"]);
   let runs = [];
   let selectedBug = null;
@@ -184,7 +203,8 @@
     body.replaceChildren();
     const filter = byId("filter").value;
     const filtered = runs
-      .filter(run => filter === "all" || category(run.status) === filter)
+      .filter(run => filter === "all"
+        || (filter === "resettable" ? resettableStatuses.has(run.status) : category(run.status) === filter))
       .sort((left, right) => sortPriority(left) - sortPriority(right)
         || (Date.parse(statusTime(right)) || 0) - (Date.parse(statusTime(left)) || 0));
     const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -260,6 +280,68 @@
     }
   }
 
+  function renderResettable() {
+    const body = byId("resettable-runs");
+    body.replaceChildren();
+    const resettable = runs
+      .filter(run => resettableStatuses.has(run.status))
+      .sort((left, right) => (Date.parse(statusTime(right)) || 0) - (Date.parse(statusTime(left)) || 0));
+    resettable.forEach(run => {
+      const row = document.createElement("tr");
+      row.dataset.bugId = run.bug_id;
+      const bugCell = document.createElement("td");
+      const bugLink = textNode("a", `#${run.bug_id}`);
+      bugLink.href = run.url || "#";
+      bugLink.addEventListener("click", async event => {
+        event.stopPropagation();
+        if (run.url) return;
+        event.preventDefault();
+        const response = await fetch(`/runs/${run.bug_id}`);
+        const detail = response.ok ? (await response.json()).run : null;
+        if (detail?.url) window.location.assign(detail.url);
+      });
+      bugCell.append(bugLink);
+      const statusCell = document.createElement("td");
+      statusCell.append(textNode("span", statusLabels[run.status] || run.status, `badge ${category(run.status)}`));
+      const errorCell = textNode("td", run.error || "-", "err");
+      if (run.error) errorCell.title = run.error;
+      const actionCell = document.createElement("td");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "重置";
+      button.className = "reset-btn";
+      button.title = "清零重试次数并重新进入队列";
+      button.addEventListener("click", async event => {
+        event.stopPropagation();
+        button.disabled = true;
+        button.textContent = "重置中…";
+        try {
+          const response = await fetch(`/runs/${run.bug_id}/resurrect`, { method: "POST" });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+          await refresh();
+        } catch (error) {
+          button.disabled = false;
+          button.textContent = "重置";
+          alert(`重置 #${run.bug_id} 失败：${error.message}`);
+        }
+      });
+      actionCell.append(button);
+      row.append(
+        bugCell,
+        textNode("td", run.title || "-", "title"),
+        textNode("td", run.project_name || "-"),
+        statusCell,
+        textNode("td", localTime(statusTime(run))),
+        errorCell,
+        actionCell
+      );
+      row.addEventListener("click", () => showRun(run));
+      body.append(row);
+    });
+    byId("resettable-empty").hidden = resettable.length !== 0;
+  }
+
   function renderPolls(polls) {
     const body = byId("polls");
     body.replaceChildren();
@@ -285,6 +367,7 @@
       const polls = (await pollsResponse.json()).polls || [];
       renderSummary();
       renderRuns();
+      renderResettable();
       renderPolls(polls);
       if (selectedBug) {
         const current = runs.find(run => run.bug_id === selectedBug);
