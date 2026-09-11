@@ -105,6 +105,8 @@ def bug_is_still_actionable(
 ) -> Tuple[bool, str]:
     """Re-read a bug right before fixing it: queued work can be hours or a restart old."""
     detail = _bug_detail(client_script, bug_id)
+    if detail.get("deleted"):
+        return False, "ZenTao bug has been deleted"
     status = str(detail.get("status") or "").strip().lower()
     if status != "active":
         return False, f"ZenTao status is now {status or 'unknown'!r}, not active"

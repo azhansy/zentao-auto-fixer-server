@@ -595,6 +595,16 @@ class ZenTaoBugFieldTests(unittest.TestCase):
         self.assertFalse(_marker_seen(without))
         self.assertTrue(_marker_seen(withmark))
 
+    def test_deleted_bug_is_not_actionable(self):
+        from zentao_auto_fixer.zentao import bug_is_still_actionable
+
+        detail = {"id": 1, "status": "active", "deleted": True, "actions": []}
+        with mock.patch("zentao_auto_fixer.zentao._bug_detail", return_value=detail):
+            self.assertEqual(
+                bug_is_still_actionable(Path("/tmp/zentao.py"), 1),
+                (False, "ZenTao bug has been deleted"),
+            )
+
     def test_owner_approved_manual_retry_can_ignore_an_old_ai_marker(self):
         from zentao_auto_fixer.zentao import bug_is_still_actionable
 
