@@ -431,7 +431,7 @@ class StateStore:
     def awaiting_merge_bug_ids(self):
         with self._lock, self._connect() as conn:
             return [int(row[0]) for row in conn.execute(
-                "SELECT bug_id FROM bug_runs WHERE status = 'awaiting_merge' ORDER BY bug_id"
+                "SELECT bug_id FROM bug_runs WHERE status IN ('awaiting_merge', 'awaiting_release', 'merge_request_failed') ORDER BY bug_id"
             )]
 
     def current_problem_count(self) -> int:

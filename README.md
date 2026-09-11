@@ -200,7 +200,7 @@ python3 -m zentao_auto_fixer.server
 | `fallbackAgent` | 可选后备引擎。当前仅在主引擎明确报告额度耗尽时切换；普通报错、超时或鉴权失败不会切换。每次后备启动也计入每日 AI 启动上限。 |
 | `app.repoUrl` / `app.targetBranch` | App 客户端仓库和目标分支。同一个仓库同时覆盖 Android 和 iOS。 |
 | `backend.repoUrl` / `backend.targetBranch` | 后端仓库和目标分支，可留空。留空时 AI 判定为后端问题的 Bug 会被打回给提 Bug 的人。 |
-| `app.deliveryMode` / `backend.deliveryMode` | 默认 `push`；`merge_request` 推送独立修复分支并通过 GitLab push options 创建 MR，目标为 `targetBranch`。当前 `im/cable` → `pre_release` 使用 MR。创建 `feature/zentao-*` 分支；四项必需 CI 齐全后开启 Auto Merge，成功并删除源分支后才 resolve。CI 失败复用同一 MR，按 `AUTO_FIXER_MAX_BUG_RETRIES` 限次修复并计入原有每日 AI 预算；等待 CI 不调用 AI。服务硬性拒绝直推 `im/cable` 的 `pre_release`。 |
+| `app.deliveryMode` / `backend.deliveryMode` | 默认 `push`；`merge_request` 推送独立修复分支并通过 GitLab push options 创建 MR，目标为 `targetBranch`。当前 `im/cable` → `pre_release` 使用 MR。创建 `feature/zentao-*` 分支；按仓库要求核验 CI 后开启 Auto Merge，合并成功后才 resolve（Cable 的检查与完成标准见下文）。CI 失败复用同一 MR，按 `AUTO_FIXER_MAX_BUG_RETRIES` 限次修复并计入原有每日 AI 预算；等待 CI 不调用 AI。服务硬性拒绝直推 `im/cable` 的 `pre_release`。 |
 | `repoUrl` / `targetBranch`（旧写法） | 顶层写法仍然兼容，等价于 `app`。 |
 | `onlyCodeBugs` | 是否只处理代码类 Bug，建议保持 `true`。 |
 | `maxBugsPerPoll` | 兼容旧配置；不再限制入队或合并批次，避免小 ID 被留到后续轮次。每次只修一个 Bug。 |
@@ -407,3 +407,12 @@ __pycache__/
 
 配置 `AUTO_FIXER_GITLAB_URL=https://gitlab.example.com` 与 `AUTO_FIXER_GITLAB_TOKEN_FILE`（服务账号可读取的私密文件，令牌需 API 权限以读取 CI、开启 MR Auto Merge，不纳入 Git）。
 `AUTO_FIXER_GITLAB_REQUIRED_JOBS` 默认 `lint,unit-test,build,integration`，必须匹配 CI job 名称；缺项、允许失败或跳过都不能交付。GitLab 项目必须开启“流水线成功才允许合并”。创建 MR 后由原有轮询器跟踪，API 错误、外部改动 MR head、失败次数耗尽等显示“MR 交付待处理”，保留 feature 分支供接手。
+
+### 按项目判定修复完成
+
+- Circllo（组局）：前后端使用项目配置的 `dev` 分支，修复验证并推送成功后自动备注、解决禅道 Bug。
+- Rhixio：客户端使用 `dev`；后端 `im/cable` 的修复通过 MR 合入 `pre_release` 后自动备注、解决禅道 Bug。
+- Cable 修复 MR 必须核验同一提交的 `sql-static-gate`、`hk-seed-environment-gate` 及所有非允许失败检查，并保留本次修复同步通过的针对性测试记录，才开启自动合并。
+- 提交到修复分支或仅创建 MR 不算完成；必须确认 MR 已合并且存在实际合并提交。不要求生产部署、Release MR 或发布验收文件。
+- 旧的“发布流程待完成”记录继续由原轮询读取，满足合并条件后自动回写；未合并的显示“已提 MR，待合并”。
+- CI 失败继续原 MR 续修；提交或目标分支被外部改动时仍阻断。回写失败沿用自动重试，不重跑业务修复。

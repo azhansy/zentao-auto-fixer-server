@@ -39,6 +39,7 @@ from .git_ops import (
     reset_hard_clean,
     run_git,
 )
+from .cable_release import check_cable_release, is_cable_release
 from .gitlab import GitLab, GitLabError, required_jobs_pass, required_jobs_present
 from .models import ProjectConfig, RunRecord, has_ui_tag, platforms_of
 from .state import StateStore
@@ -46,6 +47,7 @@ from .zentao import (
     ZenTaoPollError,
     ZenTaoResolveError,
     ZenTaoWriteError,
+    add_comment,
     bug_is_still_actionable,
     bug_view_url,
     comment_bug,
@@ -54,6 +56,29 @@ from .zentao import (
 
 
 LOGGER = logging.getLogger("zentao_auto_fixer.worker")
+
+_FOLLOWING_START_TEXT = (
+    "【AI 自动跟进】本 Bug 已被 AI 自动修复任务接管，正在处理中，请勿人工介入；"
+    "若开始 1 小时后仍未完成，可人工介入处理。"
+)
+_FOLLOWING_STILL_ACTIVE = {"queued", "running", "awaiting_merge", "awaiting_release"}
+_FOLLOWING_DONE_TEXT = {
+    "pushed": "修复成功，已提交交付",
+    "failed": "处理失败",
+    "skipped_ui": "跳过（UI 问题）",
+    "skipped_stale": "跳过（无需处理）",
+    "skipped_platform": "跳过（平台不在配置内）",
+    "unable_to_fix": "AI 无法自动修复",
+    "merge_request_failed": "合并请求失败，需人工处理",
+    "writeback_failed": "修复已推送，但禅州备注回写失败",
+    "retry_exhausted": "重试次数已耗尽",
+    "writeback_exhausted": "备注重试次数已耗尽",
+    "no_changes": "AI 未产出代码改动",
+    "manual_required": "需人工处理",
+    "sync_conflict": "仓库同步冲突",
+    "handled_in_zentao": "已在禅州处理过",
+    "rejected_to_reporter": "已退回提单人",
+}
 
 
 class Worker:
@@ -121,12 +146,39 @@ class Worker:
                 with self._queue_guard:
                     self._queued_ids.discard(bug_id)
                 self.queue.task_done()
+                self._note_following_done(bug_id)
+
+    def _note_following_started(self, batch: List[RunRecord]) -> None:
+        """Announce on ZenTao that the AI took this bug over; humans should wait up to an hour.
+
+        The note is an auxiliary signal: any failure here must never block the repair.
+        """
+        for run in batch:
+            try:
+                add_comment(self.settings.zentao_client_script, run.bug_id, _FOLLOWING_START_TEXT)
+                self.state.record_run_event(run.bug_id, "following_started", "")
+            except Exception as exc:
+                self.state.record_run_event(run.bug_id, "following_start_failed", str(exc))
+                LOGGER.warning("Could not post following-start note on bug #%s: %s", run.bug_id, exc)
+
+    def _note_following_done(self, bug_id: int) -> None:
+        """Close the loop after every consumed bug; a note goes out whatever the outcome was."""
+        run = self.state.get_run(bug_id)
+        if not run or run.status in _FOLLOWING_STILL_ACTIVE:
+            return
+        text = f"【AI 跟进完成】AI 已结束对本 Bug 的跟进，本轮结果：{_FOLLOWING_DONE_TEXT.get(run.status, run.status)}。"
+        try:
+            add_comment(self.settings.zentao_client_script, run.bug_id, text)
+            self.state.record_run_event(run.bug_id, "following_done", run.status)
+        except Exception as exc:
+            self.state.record_run_event(run.bug_id, "following_done_failed", str(exc))
+            LOGGER.warning("Could not post following-done note on bug #%s: %s", bug_id, exc)
 
     def _process_bug(self, bug_id: int) -> None:
         run = self.state.get_run(bug_id)
         if not run:
             return
-        if run.status == "awaiting_merge":
+        if run.status in {"awaiting_merge", "awaiting_release", "merge_request_failed"}:
             self._check_merge_requests(run)
             return
         if run.status == "writeback_queued":
@@ -300,6 +352,7 @@ class Worker:
             first.project_name,
             first.target_branch,
         )
+        self._note_following_started(batch)
 
         backend_repo = (project.backend_repo_url, project.backend_target_branch) if project.has_backend_repo else None
         checkouts: Dict[str, _Checkout] = {}
@@ -913,6 +966,18 @@ class Worker:
             all_merged = True
             for item in requests:
                 client = GitLab(item["url"])
+                if is_cable_release(item):
+                    complete, stage = check_cable_release(
+                        client, item, payload, self.settings.data_dir, run.bug_id,
+                        repair_failed=lambda logs: self._repair_merge_request(run, payload, item, logs))
+                    if not complete:
+                        all_merged = False
+                        self.state.set_writeback_payload(run.bug_id, json.dumps(payload, ensure_ascii=False))
+                        self.state.update_status(run.bug_id, "awaiting_merge", error=stage,
+                                                 commit_hash=run.commit_hash, handled_once=True, completed=True)
+                        if stage != run.error:
+                            self.state.record_run_event(run.bug_id, "awaiting_merge", stage)
+                    continue
                 mr, jobs = client.inspect(item["sha"], item["target"])
                 if mr.get("state") == "merged":
                     if not required_jobs_pass(jobs) or (mr.get("head_pipeline") or {}).get("status") != "success":
@@ -945,12 +1010,15 @@ class Worker:
                     self.state.record_run_event(run.bug_id, "auto_merge_enabled", item["url"])
             if all_merged:
                 payload.pop("delivery_status", None)
-                payload["solution"] += "\n必需 CI 全部通过，MR 已合并，feature 源分支已删除。"
+                payload["solution"] += ("\n修复测试及必需 CI 已通过，MR 已合入 pre_release，修复交付完成。"
+                                        if any(is_cable_release(item) for item in requests)
+                                        else "\n必需 CI 全部通过，MR 已合并，feature 源分支已删除。")
                 self.state.set_writeback_payload(run.bug_id, json.dumps(payload, ensure_ascii=False))
                 self._writeback_one(run, payload)
                 self._record_progress()
         except (GitLabError, GitError, AgentError, KeyError, ValueError, OSError) as exc:
-            self._fail_batch([run], "merge_request_failed", str(exc), run.commit_hash)
+            if run.status != "merge_request_failed" or run.error != str(exc):
+                self._fail_batch([run], "merge_request_failed", str(exc), run.commit_hash)
 
     def _repair_merge_request(self, run, payload, item, failure):
         attempts = payload.get("ci_attempts", 0)
