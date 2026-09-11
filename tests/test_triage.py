@@ -434,7 +434,7 @@ class CallSiteTests(unittest.TestCase):
         state = mock.Mock()
         state.claim_queued_batch.return_value = [run]
         state.get_run.return_value = SimpleNamespace(status="running")
-        worker = Worker(SimpleNamespace(worker_count=1), state)
+        worker = Worker(SimpleNamespace(worker_count=1, zentao_client_script=Path("/tmp/z.py")), state)
         worker._prepare_checkout = mock.Mock(side_effect=RuntimeError("boom"))
         worker._fail_batch = mock.Mock()
         project = SimpleNamespace(
@@ -443,7 +443,8 @@ class CallSiteTests(unittest.TestCase):
             has_backend_repo=False,
         )
 
-        worker._process_batch(1, project)
+        with mock.patch("zentao_auto_fixer.worker.add_comment"):
+            worker._process_batch(1, project)
 
         worker._fail_batch.assert_called_once_with([run], "failed", "boom", "", count_no_progress=True)
 
@@ -462,7 +463,7 @@ class CallSiteTests(unittest.TestCase):
         state = mock.Mock()
         state.claim_queued_batch.return_value = [run]
         state.get_run.return_value = SimpleNamespace(status="running")
-        worker = Worker(SimpleNamespace(worker_count=1), state)
+        worker = Worker(SimpleNamespace(worker_count=1, zentao_client_script=Path("/tmp/z.py")), state)
         worker._prepare_checkout = mock.Mock(side_effect=RuntimeError("service stopped"))
         worker._fail_batch = mock.Mock()
         worker._stop.set()
@@ -472,7 +473,8 @@ class CallSiteTests(unittest.TestCase):
             has_backend_repo=False,
         )
 
-        worker._process_batch(1, project)
+        with mock.patch("zentao_auto_fixer.worker.add_comment"):
+            worker._process_batch(1, project)
 
         worker._fail_batch.assert_not_called()
         state.record_run_events.assert_any_call(
@@ -592,6 +594,16 @@ class ZenTaoBugFieldTests(unittest.TestCase):
         }
         self.assertFalse(_marker_seen(without))
         self.assertTrue(_marker_seen(withmark))
+
+    def test_deleted_bug_is_not_actionable(self):
+        from zentao_auto_fixer.zentao import bug_is_still_actionable
+
+        detail = {"id": 1, "status": "active", "deleted": True, "actions": []}
+        with mock.patch("zentao_auto_fixer.zentao._bug_detail", return_value=detail):
+            self.assertEqual(
+                bug_is_still_actionable(Path("/tmp/zentao.py"), 1),
+                (False, "ZenTao bug has been deleted"),
+            )
 
     def test_owner_approved_manual_retry_can_ignore_an_old_ai_marker(self):
         from zentao_auto_fixer.zentao import bug_is_still_actionable

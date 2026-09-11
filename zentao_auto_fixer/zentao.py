@@ -105,6 +105,8 @@ def bug_is_still_actionable(
 ) -> Tuple[bool, str]:
     """Re-read a bug right before fixing it: queued work can be hours or a restart old."""
     detail = _bug_detail(client_script, bug_id)
+    if detail.get("deleted"):
+        return False, "ZenTao bug has been deleted"
     status = str(detail.get("status") or "").strip().lower()
     if status != "active":
         return False, f"ZenTao status is now {status or 'unknown'!r}, not active"
@@ -136,6 +138,102 @@ def comment_bug(client_script: Path, bug_id: int, cause: str, solution: str) -> 
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         raise ZenTaoWriteError(detail or f"zentao_client comment exited {result.returncode}")
+
+
+def add_comment(client_script: Path, bug_id: int, text: str) -> None:
+    """Post a plain ZenTao comment via the web form — deliberately no AI marker, so retry de-dup stays intact.
+
+    This ZenTao instance has no REST comment endpoint (POST /bugs/{id}/comments is 404), so this
+    walks the same web session + action-comment form the skill script uses.
+    """
+    try:
+        base_url = _required_env("ZENTAO_BASE_URL").rstrip("/")
+    except ZenTaoPollError as exc:
+        raise ZenTaoWriteError(str(exc)) from exc
+    rc, out, err = _web_form_request(f"{base_url}/api-getSessionID.json")
+    if rc != 0:
+        raise ZenTaoWriteError(f"ZenTao web session request failed: {err or out}")
+    session = _web_session_cookie(out)
+    if not session:
+        raise ZenTaoWriteError(f"ZenTao web session response carried no session cookie: {out[:200]}")
+    rc, out, err = _web_form_request(
+        f"{base_url}/user-login.json",
+        form={"account": _required_env("ZENTAO_ACCOUNT"), "password": _required_env("ZENTAO_PASSWORD")},
+        cookie=session,
+    )
+    if rc != 0:
+        raise ZenTaoWriteError(f"ZenTao web login failed: {err or out}")
+    if not (isinstance(_maybe_json(out), dict) and _maybe_json(out).get("status") == "success"):
+        raise ZenTaoWriteError(f"ZenTao web login failed: {out[:200]}")
+    rc, out, err = _web_form_request(
+        f"{base_url}/action-comment-bug-{bug_id}.json",
+        form={"comment": text},
+        cookie=session,
+    )
+    if rc != 0:
+        raise ZenTaoWriteError(f"ZenTao comment failed: {err or out}")
+    data = _maybe_json(out)
+    if isinstance(data, dict) and data.get("status") and data.get("status") != "success":
+        raise ZenTaoWriteError(f"ZenTao comment failed: {out[:200]}")
+    # The form can answer 200 without persisting the comment; read it back so a
+    # silently dropped note never makes humans wait on an AI that is not actually there.
+    try:
+        detail = _bug_detail(client_script, bug_id)
+    except ZenTaoPollError as exc:
+        raise ZenTaoWriteError(f"Commented bug #{bug_id} but could not read it back: {exc}") from exc
+    actions = detail.get("actions")
+    if not isinstance(actions, list) or not any(
+        isinstance(action, dict)
+        and str(action.get("action")) == "commented"
+        and str(action.get("comment") or "").strip().startswith(text.strip()[:20])
+        for action in actions
+    ):
+        raise ZenTaoWriteError(f"ZenTao accepted the comment on bug #{bug_id} but it is not in the history")
+
+
+def _web_form_request(url: str, form: Optional[Dict[str, str]] = None, cookie: str = "") -> Tuple[int, str, str]:
+    """One ZenTao web-form request; form fields ride on stdin so passwords never show up in `ps`."""
+    cmd = ["curl", "--silent", "--show-error", "--fail-with-body", "--max-time", "30", "--http1.1"]
+    if cookie:
+        cmd.extend(["-H", f"Cookie: {cookie}"])
+    stdin_data = ""
+    if form:
+        cmd.extend(["--data-binary", "@-"])
+        stdin_data = urlencode(form)
+    cmd.append(url)
+    result = subprocess.run(
+        cmd,
+        env=_zentao_env(),
+        text=True,
+        input=stdin_data,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
+def _web_session_cookie(out: str) -> str:
+    data = _maybe_json(out)
+    if not isinstance(data, dict):
+        return ""
+    session = data.get("data")
+    if isinstance(session, str):
+        session = _maybe_json(session)
+    if not isinstance(session, dict):
+        return ""
+    name = session.get("sessionName")
+    session_id = session.get("sessionID")
+    if not name or not session_id:
+        return ""
+    return f"{name}={session_id}"
+
+
+def _maybe_json(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return text
 
 
 def assign_bug(bug_id: int, account: str) -> None:

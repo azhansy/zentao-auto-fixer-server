@@ -65,6 +65,36 @@ class GitLab:
                 return mr, jobs
             page += 1
 
+    def pipeline_checks(self, pipeline_id):
+        checks = []
+        for endpoint in ('jobs', 'bridges'):
+            page = 1
+            while True:
+                chunk = self.request(self.project + f'/pipelines/{pipeline_id}/{endpoint}?per_page=100&page={page}')
+                checks.extend(chunk)
+                if len(chunk) < 100:
+                    break
+                page += 1
+        return checks
+
+    def verified_pipeline(self, pipeline, sha, required):
+        if not pipeline or pipeline.get('sha') != sha or pipeline.get('status') != 'success':
+            return False
+        checks = self.pipeline_checks(pipeline['id'])
+        if not required_jobs_pass(checks, required):
+            return False
+        for check in checks:
+            if check.get('allow_failure'):
+                continue
+            if check.get('status') != 'success':
+                return False
+            downstream = check.get('downstream_pipeline')
+            if check.get('name') == 'prod-sql-gate' and not downstream:
+                return False
+            if downstream and downstream.get('status') != 'success':
+                return False
+        return True
+
     def enable_auto_merge(self, sha: str):
         project = self.request(self.project)
         if not project.get('only_allow_merge_if_pipeline_succeeds'):
@@ -90,8 +120,8 @@ class GitLab:
         return '\n'.join(logs).replace(self.token, '[REDACTED]')
 
 
-def required_jobs_pass(jobs):
-    required = set(os.getenv('AUTO_FIXER_GITLAB_REQUIRED_JOBS', 'lint,unit-test,build,integration').split(','))
+def required_jobs_pass(jobs, required=None):
+    required = set(required) if required is not None else set(os.getenv('AUTO_FIXER_GITLAB_REQUIRED_JOBS', 'lint,unit-test,build,integration').split(','))
     latest = {}
     for job in jobs:
         name = job.get('name')
@@ -102,7 +132,7 @@ def required_jobs_pass(jobs):
     return all(latest[name].get('status') == 'success' and not latest[name].get('allow_failure') for name in required)
 
 
-def required_jobs_present(jobs):
-    required = set(os.getenv('AUTO_FIXER_GITLAB_REQUIRED_JOBS', 'lint,unit-test,build,integration').split(','))
+def required_jobs_present(jobs, required=None):
+    required = set(required) if required is not None else set(os.getenv('AUTO_FIXER_GITLAB_REQUIRED_JOBS', 'lint,unit-test,build,integration').split(','))
     blocking = {job.get('name') for job in jobs if not job.get('allow_failure')}
     return required <= blocking

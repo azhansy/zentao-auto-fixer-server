@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional, Tuple
 TERMINAL_STATUSES = {
     "pushed",
     "awaiting_merge",
+    "awaiting_release",
     "merge_request_failed",
     "handled_in_zentao",
     "unable_to_fix",

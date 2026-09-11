@@ -81,6 +81,29 @@ class MergeRequestTests(unittest.TestCase):
         self.assertIn('awaiting_merge', TERMINAL_STATUSES)
         self.assertIn('merge_request_failed', TERMINAL_STATUSES)
 
+    def test_circllo_dev_push_completes_and_resolves(self):
+        worker = Worker(SimpleNamespace(zentao_client_script=Path('/helper')), Mock())
+        worker._rebase_changed_checkouts = Mock(return_value=True)
+        worker._record_progress = Mock()
+        backend = _Checkout('backend', 'git@host:circll/circllo.git',
+                            Path('/cache'), Path('/backend'), 'dev', 'base')
+        run = SimpleNamespace(bug_id=42, title='组局修复', commit_hash='')
+        with patch('zentao_auto_fixer.worker.has_changes', return_value=False), \
+             patch('zentao_auto_fixer.worker.head_commit', return_value='fix'), \
+             patch('zentao_auto_fixer.worker.changed_files', return_value=[]), \
+             patch('zentao_auto_fixer.worker.push_head_dry_run'), \
+             patch('zentao_auto_fixer.worker.push_head_to_branch') as push, \
+             patch('zentao_auto_fixer.worker.push_merge_request') as mr, \
+             patch('zentao_auto_fixer.worker.comment_bug') as comment, \
+             patch('zentao_auto_fixer.worker.resolve_bug') as resolve:
+            worker._commit_push_and_resolve(
+                [run], {'backend': backend}, {42: {'solution': '修复组局'}}, '#42', 'claude', False)
+            push.assert_called_once_with(Path('/backend'), 'dev')
+            mr.assert_not_called()
+            comment.assert_called_once()
+            resolve.assert_called_once_with(Path('/helper'), 42)
+            self.assertEqual(worker.state.update_status.call_args.args[1], 'pushed')
+
     def test_permission_denial_is_not_a_rebase_retry(self):
         self.assertFalse(_looks_like_non_fast_forward('remote: You are not allowed to push code to protected branches\n[remote rejected] (pre-receive hook declined)'))
         self.assertTrue(_looks_like_non_fast_forward('[rejected] dev -> dev (fetch first)'))
@@ -93,10 +116,10 @@ class AutoMergeLifecycleTests(unittest.TestCase):
                      for i, name in enumerate(('lint', 'unit-test', 'build', 'integration'), 1)]
         self.assertTrue(required_jobs_pass(self.jobs))
         self.item = {'sha': 'abc', 'target': 'pre_release', 'source': 'feature/zentao-1',
-                     'repo_url': 'git@host:im/cable.git', 'url': 'https://gitlab.example/im/cable/-/merge_requests/1'}
+                     'repo_url': 'git@host:im/cable.git', 'url': 'https://gitlab.example/im/service/-/merge_requests/1'}
         self.payload = {'merge_requests': [self.item], 'delivery_status': 'awaiting_merge',
                         'cause': 'cause', 'solution': 'solution', 'commit_summary': 'backend:abc'}
-        self.run = SimpleNamespace(bug_id=1, commit_hash='backend:abc', writeback_payload=json.dumps(self.payload))
+        self.run = SimpleNamespace(bug_id=1, status='awaiting_merge', error='', commit_hash='backend:abc', writeback_payload=json.dumps(self.payload))
         self.worker = Worker(SimpleNamespace(worker_count=3, max_bug_retries=2, git_timeout_seconds=30), Mock())
         self.worker._project_for = Mock(return_value=SimpleNamespace(enabled=True))
         self.worker._writeback_one = Mock()
