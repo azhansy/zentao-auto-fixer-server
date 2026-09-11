@@ -119,6 +119,15 @@ def _batch_prompt(
         "禁止运行 xcodebuild build/archive 等完整构建；"
         "只允许目标明确的单元测试，不要扩大成全量编译。"
     )
+    verification_fallback = (
+        "如果同一条验证命令已经同步等待过、确认它还在正常运行（不是卡死），只是因为编译/并发资源竞争导致耗时较长、"
+        "在这次调用的时间预算内不一定能跑完：不要把它丢到后台然后空等通知，也不要因此直接判 rejected。"
+        "改为对本次改动做一次仔细的代码走查（逐行检查改动的 diff、相关调用点、边界条件、和它们如何解决这个 Bug），"
+        "确认没有问题后可以按 fixed 提交；verification 字段填 "
+        '{"method": "code_review", "review": "写清楚具体检查了哪些点、为什么确认改动正确"}，'
+        "不要编造没有真正执行过的测试命令或测试结果。这种情况仍然要在这次调用结束前产出最终结果，不允许留到"
+        "下一轮或等待任何后台通知。"
+    )
     conflict_instruction = (
         f"\n当前代码正在自动同步最新目标分支，存在需要解决的 Git 内容冲突：{conflict_context}\n"
         "先逐个解决所有冲突标记，必须同时保留远端的新改动和本次 Bug 修复意图，禁止简单整段选择任意一侧。"
@@ -145,6 +154,7 @@ Bug 列表：
 5. {verification_rule} 验证命令必须同步等它跑完拿到结果再继续。这次调用结束后不会再有下一轮、
    没有人会去看你有没有跑完，禁止把编译、构建、测试放到后台异步执行，然后自己说"稍后继续"或"等待完成通知"
    就先退出——那样这次调用就白跑了。验证产生的临时文件、日志、笔记请自行删除，不要留在工作区。
+   {verification_fallback}
 6. 禁止执行 git commit、git push、git reset、git checkout 等任何改变仓库状态的 git 命令。
 7. 禁止写禅道备注、禁止指派、禁止 resolve 或改 Bug 状态。提交、推送和禅道回写全部由外层自动修复服务完成，
    你多写一条备注会破坏服务的去重判断。
@@ -166,7 +176,9 @@ Bug 列表：
      ]
    }}
    targets 只能填 "app" 和/或 "backend"；platform 填 android、ios、both 或 unknown。
-   fixed 必须包含实际执行过的 verification.command 和 verification.passed=true；没有代码改动或测试未通过只能 rejected。
+   fixed 必须包含 verification：要么是实际执行过的 verification.command 和 verification.passed=true；
+   要么是第 5 条里说明的验证不了的例外情况，此时填 {{"method": "code_review", "review": "..."}}。
+   没有代码改动、测试未通过、且不满足第 5 条例外情况的，只能 rejected。
    understanding 和 steps 每个 Bug 都必须写。只有代码、测试、提交和推送全部成功，外层服务才会把 fixed 的内容
    写进禅道；rejected 和任何执行失败都只在本地记录。steps 写你实际用来定位/验证的操作路径，不要照抄禅道原文，
    也不要写代码层面的调用链。
@@ -201,10 +213,19 @@ def read_triage_result(result_path: Path, expected_bug_ids: Sequence[int]) -> Di
         verification = entry.get("verification") if isinstance(entry.get("verification"), dict) else {}
         verification_command = str(verification.get("command") or "").strip()
         verification_passed = verification.get("passed") is True
-        if decision == "fixed" and (not verification_command or not verification_passed):
-            raise TriageResultError(
-                f"Bug #{bug_id} reported fixed without a synchronous passing verification command"
-            )
+        verification_method = str(verification.get("method") or "").strip().lower()
+        verification_review = str(verification.get("review") or "").strip()
+        is_code_review = verification_method == "code_review"
+        if decision == "fixed":
+            if is_code_review:
+                if not verification_review:
+                    raise TriageResultError(
+                        f"Bug #{bug_id} reported fixed via code_review without review notes"
+                    )
+            elif not verification_command or not verification_passed:
+                raise TriageResultError(
+                    f"Bug #{bug_id} reported fixed without a synchronous passing verification command"
+                )
         verdicts[bug_id] = {
             "decision": decision,
             "targets": _normalized_targets(entry.get("targets")),
@@ -217,6 +238,8 @@ def read_triage_result(result_path: Path, expected_bug_ids: Sequence[int]) -> Di
             "missing": str(entry.get("missing") or "").strip(),
             "verification_command": verification_command,
             "verification_passed": verification_passed,
+            "verification_method": "code_review" if is_code_review else "test",
+            "verification_review": verification_review,
         }
     missing = [bug_id for bug_id in expected_bug_ids if bug_id not in verdicts]
     if missing:

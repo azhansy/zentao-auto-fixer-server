@@ -87,6 +87,36 @@ class TriageResultTests(unittest.TestCase):
             with self.assertRaisesRegex(TriageResultError, "without a synchronous passing verification"):
                 read_triage_result(path, [1])
 
+    def test_fixed_via_code_review_requires_review_notes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(
+                tmp,
+                {"bugs": [{"id": 1, "decision": "fixed", "verification": {"method": "code_review"}}]},
+            )
+            with self.assertRaisesRegex(TriageResultError, "without review notes"):
+                read_triage_result(path, [1])
+
+    def test_fixed_via_code_review_with_notes_is_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(
+                tmp,
+                {
+                    "bugs": [
+                        {
+                            "id": 1,
+                            "decision": "fixed",
+                            "verification": {
+                                "method": "code_review",
+                                "review": "逐行检查了 diff，确认边界条件正确",
+                            },
+                        }
+                    ]
+                },
+            )
+            verdicts = read_triage_result(path, [1])
+            self.assertEqual(verdicts[1]["verification_method"], "code_review")
+            self.assertEqual(verdicts[1]["verification_review"], "逐行检查了 diff，确认边界条件正确")
+
 
 class CommentTextTests(unittest.TestCase):
     def test_understanding_and_steps_come_before_the_cause(self):
