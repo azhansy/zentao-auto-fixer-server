@@ -124,7 +124,13 @@ class Poller:
                 if not active:
                     skipped_resolved += 1
                     if existing and existing.status in AUTO_FIXED_STATUSES:
-                        self.state.mark_seen_resolved_once(bug.bug_id, bug.status)
+                        if _has_value(bug.raw.get("closedBy") or bug.raw.get("closed_by")):
+                            if self.state.mark_verified_closed(bug.bug_id, bug.status):
+                                self.state.record_run_event(
+                                    bug.bug_id, "verified_closed", f"ZenTao status is now {bug.status!r}"
+                                )
+                        else:
+                            self.state.mark_seen_resolved_once(bug.bug_id, bug.status)
                     elif existing and existing.status == "failed":
                         message = f"ZenTao status is now {bug.status!r}; the failed task is no longer active."
                         self.state.update_status(bug.bug_id, "skipped_stale", error=message, completed=True)
@@ -135,6 +141,11 @@ class Poller:
                 candidate_count += 1
 
                 if existing:
+                    if existing.status in AUTO_FIXED_STATUSES:
+                        if self.state.mark_reactivated(bug.bug_id):
+                            self.state.record_run_event(
+                                bug.bug_id, "reactivated_after_auto_fix", "Bug came back active after the AI fix"
+                            )
                     if existing.status == "queued":
                         self.worker.enqueue(bug.bug_id)
                         skipped_existing += 1

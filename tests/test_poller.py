@@ -57,6 +57,36 @@ class UiPollerTests(unittest.TestCase):
         state.requeue_skipped_ui.assert_called_once()
         worker.enqueue.assert_called_once_with(1)
 
+    def test_pushed_bug_verified_closed_by_qa_is_marked(self):
+        poller, state, worker = _ui_poller(process_ui_bugs=False)
+        state.get_run.return_value = SimpleNamespace(status="pushed")
+        state.mark_verified_closed.return_value = True
+
+        with mock.patch(
+            "zentao_auto_fixer.poller.list_project_bugs",
+            return_value=[_bug("closed", closedBy="qa")],
+        ):
+            poller.poll_once()
+
+        state.mark_verified_closed.assert_called_once_with(1, "closed")
+        state.record_run_event.assert_called_once_with(1, "verified_closed", "ZenTao status is now 'closed'")
+        worker.enqueue.assert_not_called()
+
+    def test_pushed_bug_coming_back_active_is_marked_reactivated(self):
+        poller, state, worker = _ui_poller(process_ui_bugs=False)
+        state.get_run.return_value = SimpleNamespace(status="pushed")
+        state.mark_reactivated.return_value = True
+        poller._already_handled_in_zentao = mock.Mock(return_value="fresh")
+
+        with mock.patch(
+            "zentao_auto_fixer.poller.list_project_bugs",
+            return_value=[_bug("active")],
+        ):
+            poller.poll_once()
+
+        state.mark_reactivated.assert_called_once_with(1)
+        state.record_run_event.assert_called_once_with(1, "reactivated_after_auto_fix", mock.ANY)
+
     def test_resolved_failed_bug_no_longer_keeps_health_degraded(self):
         poller, state, worker = _ui_poller(process_ui_bugs=False)
         state.get_run.return_value = SimpleNamespace(status="failed")

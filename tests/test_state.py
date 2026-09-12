@@ -292,6 +292,27 @@ class StateTests(unittest.TestCase):
             self.assertEqual(store.claim_queued_batch(2), [])
 
 
+class FixSuccessStatsTests(unittest.TestCase):
+    def test_success_rate_counts_verified_closed_without_reactivation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            for bug_id in (1, 2, 3):
+                store.enqueue_first_run(_bug(bug_id), _project())
+                store.update_status(bug_id, "pushed", completed=True)
+            # 1: QA 验证关闭 → 计入
+            self.assertTrue(store.mark_verified_closed(1, "closed"))
+            self.assertFalse(store.mark_verified_closed(1, "closed"))  # 幂等
+            # 2: 验证关闭但之前被打回过 → 不计入
+            self.assertTrue(store.mark_reactivated(2))
+            self.assertFalse(store.mark_reactivated(2))  # 幂等
+            store.mark_verified_closed(2, "closed")
+            # 3: 仍停在 AI 自己 resolve 的状态 → 不计入
+            store.mark_seen_resolved_once(3, "resolved")
+
+            stats = store.fix_success_stats()
+            self.assertEqual(stats, {"fixed": 3, "verified_closed": 1})
+
+
 def _bug(bug_id: int) -> BugCandidate:
     return BugCandidate(
         bug_id=bug_id,

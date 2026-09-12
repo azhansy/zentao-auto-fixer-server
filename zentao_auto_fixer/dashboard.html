@@ -26,7 +26,7 @@
     h1 { font-size: 24px; }
     h2 { font-size: 16px; }
     .muted, #refresh-state { color: var(--muted); }
-    .stats { display: grid; grid-template-columns: repeat(6, minmax(110px, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .stats { display: grid; grid-template-columns: repeat(7, minmax(110px, 1fr)); gap: 12px; margin-bottom: 16px; }
     .stat, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
     .stat { padding: 14px 16px; }
     .stat strong { display: block; margin-top: 5px; font-size: 25px; }
@@ -96,6 +96,7 @@
     <div class="stat"><span class="muted">进行中</span><strong id="count-running">0</strong></div>
     <div class="stat"><span class="muted">排队</span><strong id="count-queued">0</strong></div>
     <div class="stat"><span class="muted">其他终态</span><strong id="count-other">0</strong></div>
+    <div class="stat"><span class="muted" id="rate-label">修复成功率</span><strong id="count-rate">—</strong></div>
   </section>
 
   <div class="layout">
@@ -175,6 +176,7 @@
   const resettableStatuses = new Set(["retry_exhausted", "writeback_exhausted", "unable_to_fix", "failed", "sync_conflict", "manual_required", "skipped_stale", "merge_request_failed", "no_changes"]);
   const queuedStatuses = new Set(["queued", "writeback_queued"]);
   let runs = [];
+  let fixSuccess = { fixed: 0, verified_closed: 0 };
   let selectedBug = null;
   let refreshing = false;
   let page = 1;
@@ -200,6 +202,14 @@
     const counts = { all: runs.length, success: 0, failure: 0, running: 0, queued: 0, other: 0 };
     runs.forEach(run => counts[category(run.status)]++);
     Object.entries(counts).forEach(([key, value]) => byId(`count-${key}`).textContent = value);
+    const success = fixSuccess || { fixed: 0, verified_closed: 0 };
+    if (success.fixed > 0) {
+      byId("count-rate").textContent = `${Math.round(100 * success.verified_closed / success.fixed)}%`;
+      byId("rate-label").textContent = `修复成功率 · 验证关闭 ${success.verified_closed}/${success.fixed}`;
+    } else {
+      byId("count-rate").textContent = "—";
+      byId("rate-label").textContent = "修复成功率";
+    }
   }
 
   function renderRuns() {
@@ -367,7 +377,9 @@
         fetch("/runs?limit=500"), fetch("/polls?limit=100")
       ]);
       if (!runsResponse.ok || !pollsResponse.ok) throw new Error(`HTTP ${runsResponse.status}/${pollsResponse.status}`);
-      runs = (await runsResponse.json()).runs || [];
+      const runsData = await runsResponse.json();
+      runs = runsData.runs || [];
+      fixSuccess = runsData.fix_success || { fixed: 0, verified_closed: 0 };
       const polls = (await pollsResponse.json()).polls || [];
       renderSummary();
       renderRuns();

@@ -63,7 +63,10 @@ class DashboardTests(unittest.TestCase):
     def test_runs_honors_bounded_limit(self):
         seen = []
         app = SimpleNamespace(
-            state=SimpleNamespace(list_runs=lambda limit: seen.append(limit) or [{"bug_id": 7310}])
+            state=SimpleNamespace(
+                list_runs=lambda limit: seen.append(limit) or [{"bug_id": 7310}],
+                fix_success_stats=lambda: {"fixed": 1, "verified_closed": 0},
+            )
         )
 
         with patch.dict("os.environ", {"ZENTAO_BASE_URL": "https://zentao.example.test/zentao"}):
@@ -78,7 +81,8 @@ class DashboardTests(unittest.TestCase):
                         "bug_id": 7310,
                         "url": "https://zentao.example.test/zentao/bug-view-7310.html",
                     }
-                ]
+                ],
+                "fix_success": {"fixed": 1, "verified_closed": 0},
             },
         )
         self.assertEqual(seen, [500])

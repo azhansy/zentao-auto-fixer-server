@@ -119,6 +119,8 @@ class StateStore:
             "triage_targets": "TEXT NOT NULL DEFAULT ''",
             "retry_count": "INTEGER NOT NULL DEFAULT 0",
             "writeback_payload": "TEXT NOT NULL DEFAULT ''",
+            "verified_closed": "INTEGER NOT NULL DEFAULT 0",
+            "reactivated_after_auto_fix": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, definition in additions.items():
             if name not in existing:
@@ -491,6 +493,23 @@ class StateStore:
             "running": int(running["count"]) if running else 0,
         }
 
+    def fix_success_stats(self) -> Dict[str, int]:
+        """Success rate: pushed fixes that QA verified and closed without anyone stepping back in."""
+        with self._lock, self._connect() as conn:
+            fixed = conn.execute(
+                "SELECT COUNT(*) AS c FROM bug_runs WHERE status = 'pushed'"
+            ).fetchone()
+            verified = conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM bug_runs
+                WHERE status = 'pushed' AND verified_closed = 1 AND reactivated_after_auto_fix = 0
+                """
+            ).fetchone()
+        return {
+            "fixed": int(fixed["c"] or 0),
+            "verified_closed": int(verified["c"] or 0),
+        }
+
     def awaiting_merge_bug_ids(self):
         with self._lock, self._connect() as conn:
             return [int(row[0]) for row in conn.execute(
@@ -727,6 +746,32 @@ class StateStore:
                 """,
                 (bug_status, bug_id),
             )
+
+    def mark_verified_closed(self, bug_id: int, bug_status: str) -> bool:
+        """QA verified and closed the bug after the AI fix; returns True only on the first mark."""
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE bug_runs
+                SET verified_closed = 1, seen_resolved_once = 1, bug_status = ?
+                WHERE bug_id = ? AND verified_closed = 0
+                """,
+                (bug_status, bug_id),
+            )
+            return cursor.rowcount > 0
+
+    def mark_reactivated(self, bug_id: int) -> bool:
+        """The bug came back active after the AI pushed a fix; returns True only on the first mark."""
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE bug_runs
+                SET reactivated_after_auto_fix = 1
+                WHERE bug_id = ? AND reactivated_after_auto_fix = 0
+                """,
+                (bug_id,),
+            )
+            return cursor.rowcount > 0
 
     def mark_unable_to_fix(self, bug_id: int, reason: str) -> None:
         with self._lock, self._connect() as conn:
