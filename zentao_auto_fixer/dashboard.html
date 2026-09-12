@@ -29,7 +29,9 @@
     .stats { display: grid; grid-template-columns: repeat(7, minmax(110px, 1fr)); gap: 12px; margin-bottom: 16px; }
     .stat, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
     .stat { padding: 14px 16px; }
-    .help { display: inline-block; width: 15px; height: 15px; line-height: 15px; text-align: center; border: 1px solid var(--line); border-radius: 50%; font-size: 11px; cursor: help; margin-left: 4px; vertical-align: 1px; }
+    .help { display: inline-block; width: 15px; height: 15px; line-height: 15px; text-align: center; border: 1px solid var(--line); border-radius: 50%; font-size: 11px; cursor: pointer; margin-left: 4px; vertical-align: 1px; }
+    .stat { position: relative; }
+    .help-tip { position: absolute; top: 100%; left: 0; margin-top: 6px; padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; line-height: 1.5; max-width: 240px; z-index: 10; }
     .stat strong { display: block; margin-top: 5px; font-size: 25px; }
     .layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 440px); gap: 16px; align-items: start; }
     .panel { overflow: hidden; }
@@ -97,7 +99,7 @@
     <div class="stat"><span class="muted">进行中</span><strong id="count-running">0</strong></div>
     <div class="stat"><span class="muted">排队</span><strong id="count-queued">0</strong></div>
     <div class="stat"><span class="muted">其他终态</span><strong id="count-other">0</strong></div>
-    <div class="stat"><span class="muted" id="rate-label">修复成功率</span><span class="help" title="分子：AI 修复后被 QA 验证关闭、期间无人打回的 bug 数；分母：AI 成功修复（已推送）的总数。">?</span><strong id="count-rate">—</strong></div>
+    <div class="stat"><span class="muted" id="rate-label">修复成功率</span><span class="help" id="rate-help" role="button" tabindex="0" title="分子：AI 修复后被 QA 验证关闭、期间无人打回的 bug 数；分母：AI 成功修复（已推送）的总数。">?</span><strong id="count-rate">—</strong><div class="help-tip" id="rate-tip" hidden>分子：AI 修复后被 QA 验证关闭、期间无人打回的 bug 数；分母：AI 成功修复（已推送）的总数。</div></div>
   </section>
 
   <div class="layout">
@@ -399,6 +401,10 @@
   }
 
   byId("filter").addEventListener("change", () => { page = 1; renderRuns(); });
+  byId("rate-help").addEventListener("click", () => {
+    const tip = byId("rate-tip");
+    tip.hidden = !tip.hidden;
+  });
   byId("previous-page").addEventListener("click", () => { page--; renderRuns(); });
   byId("next-page").addEventListener("click", () => { page++; renderRuns(); });
   byId("reset-all").addEventListener("click", async () => {

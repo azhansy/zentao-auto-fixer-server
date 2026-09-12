@@ -491,6 +491,16 @@ class CallSiteTests(unittest.TestCase):
         worker._fail_batch.assert_called_once_with([run], "failed", mock.ANY, "", count_no_progress=False)
         worker._record_progress.assert_called_once()
 
+    def test_friendly_error_turns_agent_failures_into_chinese(self):
+        from zentao_auto_fixer.agent_runner import AgentCredentialError, AgentError, AgentQuotaError
+        from zentao_auto_fixer.worker import _friendly_error
+
+        self.assertIn("凭证失效或余额不足", _friendly_error(AgentCredentialError("claude credential/auth failure:\n英文输出")))
+        self.assertIn("配额已用尽", _friendly_error(AgentQuotaError("quota exhausted")))
+        self.assertIn("处理超时", _friendly_error(AgentError("claude timed out after 3600s")))
+        self.assertIn("AI 引擎执行失败", _friendly_error(AgentError("claude failed with exit 1")))
+        self.assertEqual(_friendly_error(RuntimeError("boom")), "boom")
+
     def test_agent_credential_failure_marks_402_and_unrecognized_model(self):
         from zentao_auto_fixer.agent_runner import _agent_credential_failure
 

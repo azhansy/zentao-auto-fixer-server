@@ -487,7 +487,7 @@ class Worker:
             unfinished = [run for run in batch if _still_running(self.state, run.bug_id)]
             # Auth/balance failures are not the AI's fault: don't count them toward the
             # no-progress fuse, and clear earlier counts so a restored token resumes work.
-            self._fail_batch(unfinished, "failed", str(exc), "", count_no_progress=False)
+            self._fail_batch(unfinished, "failed", _friendly_error(exc), "", count_no_progress=False)
             self._record_progress()
             LOGGER.exception("Worker failed batch %s on a credential error", batch_label)
         except Exception as exc:
@@ -500,7 +500,7 @@ class Worker:
                 )
                 LOGGER.info("Worker interrupted batch %s for service stop", batch_label)
             else:
-                self._fail_batch(unfinished, "failed", str(exc), "", count_no_progress=True)
+                self._fail_batch(unfinished, "failed", _friendly_error(exc), "", count_no_progress=True)
                 LOGGER.exception("Worker failed batch %s", batch_label)
         finally:
             for checkout in checkouts.values():
@@ -1313,6 +1313,19 @@ def _still_running(state: StateStore, bug_id: int) -> bool:
     """Bugs already rejected or pushed keep their outcome when a later step blows up."""
     current = state.get_run(bug_id)
     return bool(current and current.status == "running")
+
+
+def _friendly_error(exc: Exception) -> str:
+    """Human-readable Chinese summary for ZenTao notes; raw agent output stays in the event log."""
+    if isinstance(exc, AgentCredentialError):
+        return "AI 服务凭证失效或余额不足（token 过期或账户欠费），本轮未实际调用 AI；恢复后会自动重试。"
+    if isinstance(exc, AgentQuotaError):
+        return "AI 调用配额已用尽，今日无法继续自动修复。"
+    if isinstance(exc, AgentError):
+        if "timed out" in str(exc):
+            return "AI 处理超时，本轮未完成修复。"
+        return "AI 引擎执行失败，详情见任务流水。"
+    return str(exc)
 
 
 def _looks_like_non_fast_forward(error: str) -> bool:
