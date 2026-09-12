@@ -4,6 +4,7 @@ import contextlib
 import json
 import logging
 import queue
+import re
 import threading
 import time
 from datetime import datetime
@@ -190,10 +191,7 @@ class Worker:
             return
         text = f"【AI 跟进完成】AI 已结束对本 Bug 的跟进，本轮结果：{_FOLLOWING_DONE_TEXT.get(run.status, run.status)}。"
         if getattr(run, "error", ""):
-            detail = str(run.error).strip()
-            if len(detail) > 120:
-                detail = detail[:120].rstrip() + "…"
-            text += f"\n原因：{detail}"
+            text += f"\n原因：{_summarize_error(str(run.error))}"
         try:
             add_comment(self.settings.zentao_client_script, run.bug_id, text)
             self.state.record_run_event(run.bug_id, "following_done", run.status)
@@ -1320,6 +1318,24 @@ def _still_running(state: StateStore, bug_id: int) -> bool:
     """Bugs already rejected or pushed keep their outcome when a later step blows up."""
     current = state.get_run(bug_id)
     return bool(current and current.status == "running")
+
+
+def _summarize_error(detail: str, limit: int = 120) -> str:
+    """Compress a long error into its gist: the lead sentence plus what is still missing."""
+    text = " ".join((detail or "").split())
+    if len(text) <= limit:
+        return text
+    reason, _, missing = text.partition("需要补充：")
+    lead = re.split(r"[。；]", reason, maxsplit=1)[0].strip()
+    if not lead:
+        lead = reason[: limit - 10].rstrip()
+    summary = lead
+    if missing:
+        need = re.split(r"[。；，,]", missing, maxsplit=1)[0].strip()
+        summary += f"；需补充：{need}"
+    if len(summary) > limit:
+        summary = summary[:limit].rstrip()
+    return summary
 
 
 def _friendly_error(exc: Exception) -> str:

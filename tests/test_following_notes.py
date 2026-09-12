@@ -91,17 +91,35 @@ class FollowingNotesTests(unittest.TestCase):
         self.assertIn("处理失败", text)
         self.assertIn("原因：claude failed with exit 1: boom", text)
 
-    def test_done_note_reason_is_truncated_to_120_chars(self):
+    def test_done_note_reason_is_summarized_not_bluntly_truncated(self):
+        from zentao_auto_fixer.worker import _summarize_error
+
+        long_detail = (
+            "描述不足且无法定位到代码缺陷：报单只有通用步骤，没有页面/按钮名称、账号与 App 版本。"
+            "对 iOS 付费全链路逐项核对后：新订单必然返回 present_payment_sheet，客户端只有在 "
+            "Stripe 支付面板交互完成后才可能推进资金状态。 需要补充：复现步骤、测试账号、订单号与截图。"
+        )
+        summary = _summarize_error(long_detail)
+        self.assertLessEqual(len(summary), 120)
+        self.assertTrue(summary.startswith("描述不足且无法定位到代码缺陷"))
+        self.assertIn("需补充：", summary)
+        self.assertNotIn("逐项核对", summary)  # 过程性内容被摘掉
+
+        self.assertEqual(_summarize_error("短原因。"), "短原因。")
+        self.assertEqual(
+            _summarize_error("第一句。后面的过程性描述很长很长，不需要出现在备注里。" * 5),
+            "第一句",
+        )
+
+    def test_done_note_reason_uses_summary(self):
         worker, state = self._worker()
         state.get_run.return_value = SimpleNamespace(
-            bug_id=7, status="unable_to_fix", error="长原因" * 100
+            bug_id=7, status="unable_to_fix", error="第一句结论。后续很长的过程性描述。" * 3
         )
         with mock.patch("zentao_auto_fixer.worker.add_comment") as add:
             worker._note_following_done(7)
         text = add.call_args.args[2]
-        self.assertIn("原因：", text)
-        self.assertLessEqual(len(text), 175)  # 截断到 120 字 + 模板开销约 45 字
-        self.assertTrue(text.rstrip().endswith("…"))
+        self.assertIn("原因：第一句结论", text)
 
     def test_done_note_without_reason_stays_one_line(self):
         worker, state = self._worker()
