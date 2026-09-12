@@ -15,6 +15,7 @@ class FollowingNotesTests(unittest.TestCase):
 
     def test_start_note_posted_for_every_bug_in_batch(self):
         worker, state = self._worker()
+        state.list_run_events.return_value = []
         runs = [SimpleNamespace(bug_id=1), SimpleNamespace(bug_id=2)]
         with mock.patch("zentao_auto_fixer.worker.add_comment") as add:
             worker._note_following_started(runs)
@@ -24,8 +25,33 @@ class FollowingNotesTests(unittest.TestCase):
         state.record_run_event.assert_any_call(1, "following_started", "")
         state.record_run_event.assert_any_call(2, "following_started", "")
 
+    def test_start_note_not_reposted_while_previous_one_is_open(self):
+        worker, state = self._worker()
+        state.list_run_events.return_value = [{"event": "started"}, {"event": "following_started"}]
+        with mock.patch("zentao_auto_fixer.worker.add_comment") as add:
+            worker._note_following_started([SimpleNamespace(bug_id=1)])
+        add.assert_not_called()
+
+    def test_start_note_reposted_after_previous_round_closed(self):
+        worker, state = self._worker()
+        state.list_run_events.return_value = [
+            {"event": "following_started"},
+            {"event": "following_done"},
+        ]
+        with mock.patch("zentao_auto_fixer.worker.add_comment") as add:
+            worker._note_following_started([SimpleNamespace(bug_id=1)])
+        add.assert_called_once()
+
+    def test_start_note_posted_when_no_events_yet(self):
+        worker, state = self._worker()
+        state.list_run_events.return_value = []
+        with mock.patch("zentao_auto_fixer.worker.add_comment") as add:
+            worker._note_following_started([SimpleNamespace(bug_id=1)])
+        add.assert_called_once()
+
     def test_start_note_failure_is_swallowed(self):
         worker, state = self._worker()
+        state.list_run_events.return_value = []
         with mock.patch(
             "zentao_auto_fixer.worker.add_comment", side_effect=ZenTaoWriteError("boom")
         ):

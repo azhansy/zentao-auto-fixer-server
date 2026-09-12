@@ -156,12 +156,30 @@ class Worker:
         The note is an auxiliary signal: any failure here must never block the repair.
         """
         for run in batch:
+            if self._has_open_following_note(run.bug_id):
+                LOGGER.info("Bug #%s already carries an open following-start note; not posting another", run.bug_id)
+                continue
             try:
                 add_comment(self.settings.zentao_client_script, run.bug_id, _FOLLOWING_START_TEXT)
                 self.state.record_run_event(run.bug_id, "following_started", "")
             except Exception as exc:
                 self.state.record_run_event(run.bug_id, "following_start_failed", str(exc))
                 LOGGER.warning("Could not post following-start note on bug #%s: %s", run.bug_id, exc)
+
+    def _has_open_following_note(self, bug_id: int) -> bool:
+        """True when a following-start note was posted and no following-done note closed it yet.
+
+        A service restart requeues running bugs and re-runs them; without this gate every
+        recovery would post another identical start note on the same bug.
+        """
+        last_start = last_done = -1
+        for index, event in enumerate(self.state.list_run_events(bug_id)):
+            name = event.get("event") if isinstance(event, dict) else ""
+            if name == "following_started":
+                last_start = index
+            elif name == "following_done":
+                last_done = index
+        return last_start > last_done
 
     def _note_following_done(self, bug_id: int) -> None:
         """Close the loop after every consumed bug; a note goes out whatever the outcome was."""

@@ -466,6 +466,7 @@ class CallSiteTests(unittest.TestCase):
         state = mock.Mock()
         state.claim_queued_batch.return_value = [run]
         state.get_run.return_value = SimpleNamespace(status="running")
+        state.list_run_events.return_value = []
         worker = Worker(SimpleNamespace(worker_count=1, zentao_client_script=Path("/tmp/z.py")), state)
         worker._prepare_checkout = mock.Mock(side_effect=RuntimeError("boom"))
         worker._fail_batch = mock.Mock()
@@ -495,6 +496,7 @@ class CallSiteTests(unittest.TestCase):
         state = mock.Mock()
         state.claim_queued_batch.return_value = [run]
         state.get_run.return_value = SimpleNamespace(status="running")
+        state.list_run_events.return_value = []
         worker = Worker(SimpleNamespace(worker_count=1, zentao_client_script=Path("/tmp/z.py")), state)
         worker._prepare_checkout = mock.Mock(side_effect=RuntimeError("service stopped"))
         worker._fail_batch = mock.Mock()
