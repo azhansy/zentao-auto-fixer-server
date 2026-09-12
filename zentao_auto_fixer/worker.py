@@ -1332,6 +1332,7 @@ def _summarize_error(detail: str, limit: int = 120) -> str:
     summary = lead
     if missing:
         need = re.split(r"[。；，,]", missing, maxsplit=1)[0].strip()
+        need = re.sub(r"^需要补充[:：]?\s*", "", need)
         summary += f"；需补充：{need}"
     if len(summary) > limit:
         summary = summary[:limit].rstrip()
