@@ -97,6 +97,13 @@ def _has_ai_marker(detail: Dict[str, Any]) -> bool:
     )
 
 
+def bug_closed_by(client_script: Path, bug_id: int) -> str:
+    """Who closed the bug, or '' when it is not closed. Closed bugs vanish from the list API."""
+    detail = _bug_detail(client_script, bug_id)
+    value = detail.get("closedBy") or detail.get("closed_by")
+    return _account_value(value)
+
+
 def bug_fresh_title(client_script: Path, bug_id: int) -> str:
     """The queued title can be hours old; humans may have edited it (e.g. added a 【ui】 tag)."""
     detail = _bug_detail(client_script, bug_id)

@@ -72,6 +72,33 @@ class UiPollerTests(unittest.TestCase):
         state.record_run_event.assert_called_once_with(1, "verified_closed", "ZenTao status is now 'closed'")
         worker.enqueue.assert_not_called()
 
+    def test_pushed_bug_vanished_from_list_and_closed_is_verified_closed(self):
+        poller, state, worker = _ui_poller(process_ui_bugs=False)
+        state.get_run.return_value = None
+        state.pushed_resolved_unverified.return_value = [1]
+        state.mark_verified_closed.return_value = True
+
+        with mock.patch(
+            "zentao_auto_fixer.poller.list_project_bugs", return_value=[]
+        ), mock.patch("zentao_auto_fixer.poller.bug_closed_by", return_value="hejiajie"):
+            poller.poll_once()
+
+        state.mark_verified_closed.assert_called_once_with(1, "closed")
+        state.record_run_event.assert_called_once_with(1, "verified_closed", "closedBy=hejiajie")
+
+    def test_pushed_bug_still_listed_is_not_rechecked(self):
+        poller, state, worker = _ui_poller(process_ui_bugs=False)
+        state.get_run.return_value = None
+        state.pushed_resolved_unverified.return_value = [1]
+
+        with mock.patch(
+            "zentao_auto_fixer.poller.list_project_bugs", return_value=[_bug("resolved")]
+        ), mock.patch("zentao_auto_fixer.poller.bug_closed_by") as closed_by:
+            poller.poll_once()
+
+        closed_by.assert_not_called()
+        state.mark_verified_closed.assert_not_called()
+
     def test_pushed_bug_coming_back_active_is_marked_reactivated(self):
         poller, state, worker = _ui_poller(process_ui_bugs=False)
         state.get_run.return_value = SimpleNamespace(status="pushed")
@@ -197,6 +224,7 @@ def _ui_poller(*, process_ui_bugs: bool, max_bugs_per_poll: int = 3):
     state = mock.Mock()
     state.awaiting_merge_bug_ids.return_value = []
     state.get_run.return_value = None
+    state.pushed_resolved_unverified.return_value = []
     worker = mock.Mock()
     worker.dispatch_lock = threading.Lock()
     return Poller(settings, state, worker), state, worker

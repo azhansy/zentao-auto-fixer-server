@@ -493,6 +493,20 @@ class StateStore:
             "running": int(running["count"]) if running else 0,
         }
 
+    def pushed_resolved_unverified(self, project_name: str) -> List[int]:
+        """Pushed bugs that reached resolved but no verified close yet; closed ones vanish from the list API."""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT bug_id FROM bug_runs
+                WHERE status = 'pushed' AND seen_resolved_once = 1 AND verified_closed = 0
+                  AND project_name = ?
+                ORDER BY bug_id
+                """,
+                (project_name,),
+            ).fetchall()
+        return [int(row["bug_id"]) for row in rows]
+
     def fix_success_stats(self) -> Dict[str, int]:
         """Success rate: pushed fixes that QA verified and closed without anyone stepping back in."""
         with self._lock, self._connect() as conn:

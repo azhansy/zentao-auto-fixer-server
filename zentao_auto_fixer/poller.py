@@ -19,7 +19,7 @@ from .models import (
 )
 from .state import StateStore, utc_now
 from .worker import Worker
-from .zentao import ZenTaoPollError, bug_has_ai_comment, list_project_bugs
+from .zentao import ZenTaoPollError, bug_closed_by, bug_has_ai_comment, list_project_bugs
 
 
 LOGGER = logging.getLogger("zentao_auto_fixer.poller")
@@ -84,6 +84,21 @@ class Poller:
             self.state.mark_handled_in_zentao(bug.bug_id)
         return "handled"
 
+    def _check_closed_vanished(self, project: ProjectConfig, listed_ids: set) -> None:
+        """Closed bugs vanish from the list API; a pushed bug that reached resolved but is no longer
+        listed may have been verified and closed by QA — read its detail to find out."""
+        for bug_id in self.state.pushed_resolved_unverified(project.name):
+            if bug_id in listed_ids:
+                continue
+            try:
+                closed_by = bug_closed_by(self.settings.zentao_client_script, bug_id)
+            except ZenTaoPollError as exc:
+                LOGGER.warning("Could not re-read vanished bug #%s: %s", bug_id, exc)
+                continue
+            if closed_by and self.state.mark_verified_closed(bug_id, "closed"):
+                self.state.record_run_event(bug_id, "verified_closed", f"closedBy={closed_by}")
+                LOGGER.info("Bug #%s verified closed by %s", bug_id, closed_by)
+
     def _poll_project(self, project: ProjectConfig) -> None:
         started_at = utc_now()
         total = 0
@@ -102,6 +117,7 @@ class Poller:
             total = len(bugs)
             existing_runs = {bug.bug_id: self.state.get_run(bug.bug_id) for bug in bugs}
             bugs.sort(key=lambda bug: bug.bug_id)
+            self._check_closed_vanished(project, {bug.bug_id for bug in bugs})
             for bug in bugs:
                 if bug.bug_id <= 0:
                     skipped_resolved += 1
