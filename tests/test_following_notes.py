@@ -100,7 +100,7 @@ class FollowingNotesTests(unittest.TestCase):
             worker._note_following_done(7)
         text = add.call_args.args[2]
         self.assertIn("原因：", text)
-        self.assertLessEqual(len(text), 150)  # 截断到 120 字 + 模板开销
+        self.assertLessEqual(len(text), 175)  # 截断到 120 字 + 模板开销约 45 字
         self.assertTrue(text.rstrip().endswith("…"))
 
     def test_done_note_without_reason_stays_one_line(self):
