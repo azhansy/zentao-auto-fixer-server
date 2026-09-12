@@ -94,22 +94,28 @@ class FollowingNotesTests(unittest.TestCase):
     def test_done_note_reason_is_summarized_not_bluntly_truncated(self):
         from zentao_auto_fixer.worker import _summarize_error
 
+        # 任意格式的长原因：保留开头完整的句子到 120 字左右，不依赖特定措辞
         long_detail = (
-            "描述不足且无法定位到代码缺陷：报单只有通用步骤，没有页面/按钮名称、账号与 App 版本。"
-            "对 iOS 付费全链路逐项核对后：新订单必然返回 present_payment_sheet，客户端只有在 "
-            "Stripe 支付面板交互完成后才可能推进资金状态。 需要补充：复现步骤、测试账号、订单号与截图。"
+            "第一句结论。第二句补充说明。第三句过程性核对，"
+            "第四句更多过程性核对，第五句更多过程性核对，第六句更多过程性核对，第七句更多过程性核对。"
         )
         summary = _summarize_error(long_detail)
         self.assertLessEqual(len(summary), 120)
-        self.assertTrue(summary.startswith("描述不足且无法定位到代码缺陷"))
-        self.assertIn("需补充：", summary)
-        self.assertNotIn("逐项核对", summary)  # 过程性内容被摘掉
+        self.assertTrue(summary.startswith("第一句结论。第二句补充说明。"))
+        self.assertFalse(summary.endswith("…"))  # 句子完整保留，不机械截断
 
         self.assertEqual(_summarize_error("短原因。"), "短原因。")
-        self.assertEqual(
-            _summarize_error("第一句。后面的过程性描述很长很长，不需要出现在备注里。" * 5),
-            "第一句",
+
+        # 单句超过上限：截断兜底
+        self.assertLessEqual(len(_summarize_error("超长无标点" * 100)), 120)
+
+        # 真实案例的格式（描述不足…需要补充…）也能给出开头句摘要
+        real_case = (
+            "描述不足且无法定位到代码缺陷：报单只有通用步骤，没有页面名称与账号。"
+            "对 iOS 付费全链路逐项核对后确认客户端只能在 Stripe 交互后推进资金状态。"
+            "需要补充复现步骤、测试账号、订单号与截图。"
         )
+        self.assertTrue(_summarize_error(real_case).startswith("描述不足且无法定位到代码缺陷"))
 
     def test_done_note_reason_uses_summary(self):
         worker, state = self._worker()

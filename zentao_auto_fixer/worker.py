@@ -1321,22 +1321,22 @@ def _still_running(state: StateStore, bug_id: int) -> bool:
 
 
 def _summarize_error(detail: str, limit: int = 120) -> str:
-    """Compress a long error into its gist: the lead sentence plus what is still missing."""
+    """Compress a long error to ~120 chars by keeping its leading sentences intact.
+
+    Chinese error texts lead with the conclusion, so the first sentences are the gist;
+    no special-casing of particular phrasings.
+    """
     text = " ".join((detail or "").split())
     if len(text) <= limit:
         return text
-    reason, _, missing = text.partition("需要补充：")
-    lead = re.split(r"[。；]", reason, maxsplit=1)[0].strip()
-    if not lead:
-        lead = reason[: limit - 10].rstrip()
-    summary = lead
-    if missing:
-        need = re.split(r"[。；，,]", missing, maxsplit=1)[0].strip()
-        need = re.sub(r"^需要补充[:：]?\s*", "", need)
-        summary += f"；需补充：{need}"
-    if len(summary) > limit:
-        summary = summary[:limit].rstrip()
-    return summary
+    summary = ""
+    for sentence in re.split(r"(?<=[。；！？])", text):
+        if not sentence.strip():
+            continue
+        if len(summary) + len(sentence) > limit:
+            break
+        summary += sentence
+    return (summary or text[:limit]).strip()
 
 
 def _friendly_error(exc: Exception) -> str:
