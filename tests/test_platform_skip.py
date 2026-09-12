@@ -186,6 +186,7 @@ class MultiPlatformHandBackTests(unittest.TestCase):
 
 class UiWorkerGateTests(unittest.TestCase):
     def test_queued_ui_bug_is_skipped_before_any_agent_budget_is_used(self):
+        from pathlib import Path
         from types import SimpleNamespace
         from unittest import mock
 
@@ -197,6 +198,7 @@ class UiWorkerGateTests(unittest.TestCase):
             max_agent_runs_per_day=10,
             validate_for_worker=lambda: None,
             load_projects=lambda: [project],
+            zentao_client_script=Path("/tmp/z.py"),
         )
         state = mock.Mock()
         state.get_run.return_value = SimpleNamespace(
@@ -208,7 +210,8 @@ class UiWorkerGateTests(unittest.TestCase):
         )
         worker = Worker(settings, state)
 
-        worker._process_bug(1)
+        with mock.patch("zentao_auto_fixer.worker.bug_fresh_title", return_value="【UI】按钮错位"):
+            worker._process_bug(1)
 
         state.update_status.assert_called_once_with(
             1,

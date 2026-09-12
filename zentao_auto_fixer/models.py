@@ -18,6 +18,7 @@ TERMINAL_STATUSES = {
     "rejected_to_reporter",
     "skipped_platform",
     "skipped_ui",
+    "skipped_manual",
 }
 RETRYABLE_STATUSES = {"failed", "sync_conflict", "skipped_stale", "manual_required"}
 # Non-successful statuses the dashboard "重置" button may reset back into the queue.
@@ -73,6 +74,11 @@ def platforms_of(title: str) -> Tuple[str, ...]:
 def has_ui_tag(title: str) -> bool:
     """Whether the title contains an exact 【UI】 or [UI] tag, case-insensitively."""
     return bool(re.search(r"(?:【\s*ui\s*】|\[\s*ui\s*\])", title or "", re.IGNORECASE))
+
+
+def has_manual_tag(title: str) -> bool:
+    """Whether the title carries an exact 【人工】 or [人工] tag — these are handled by humans, never by AI."""
+    return bool(re.search(r"(?:【\s*人工\s*】|\[\s*人工\s*\])", title or "", re.IGNORECASE))
 
 
 @dataclass(frozen=True)

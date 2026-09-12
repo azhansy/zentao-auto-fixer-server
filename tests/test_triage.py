@@ -304,7 +304,7 @@ class CallSiteTests(unittest.TestCase):
         }
         state = mock.Mock()
         state.get_run.side_effect = lambda bug_id: runs[bug_id]
-        settings = SimpleNamespace(worker_count=2, validate_for_worker=lambda: "")
+        settings = SimpleNamespace(worker_count=2, validate_for_worker=lambda: "", zentao_client_script=Path("/tmp/z.py"))
         worker = Worker(settings, state)
         worker._project_for = mock.Mock(
             return_value=SimpleNamespace(process_ui_bugs=True, has_backend_repo=False)
@@ -314,7 +314,9 @@ class CallSiteTests(unittest.TestCase):
         barrier = threading.Barrier(2)
         worker._process_batch = mock.Mock(side_effect=lambda _bug_id, _project: barrier.wait(timeout=2))
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        with mock.patch("zentao_auto_fixer.worker.bug_fresh_title", return_value="无标签标题"), ThreadPoolExecutor(
+            max_workers=2
+        ) as pool:
             list(pool.map(worker._process_bug, (1, 2)))
 
         self.assertEqual(worker._process_batch.call_count, 2)

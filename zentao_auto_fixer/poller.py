@@ -13,6 +13,7 @@ from .models import (
     TERMINAL_STATUSES,
     BugCandidate,
     ProjectConfig,
+    has_manual_tag,
     has_ui_tag,
     platforms_of,
 )
@@ -93,6 +94,7 @@ class Poller:
         skipped_resolved = 0
         skipped_platform = 0
         skipped_ui = 0
+        skipped_manual = 0
         marked_manual = 0
         requeued_failed = 0
         try:
@@ -109,6 +111,10 @@ class Poller:
 
                 if active and has_ui_tag(bug.title) and not project.process_ui_bugs:
                     skipped_ui += 1
+                    continue
+
+                if active and has_manual_tag(bug.title):
+                    skipped_manual += 1
                     continue
 
                 if active and project.skips_platforms(platforms_of(bug.title)):
@@ -201,13 +207,13 @@ class Poller:
                 candidate_bugs=candidate_count,
                 queued_bugs=queued,
                 skipped_existing=skipped_existing,
-                skipped_resolved=skipped_resolved + skipped_platform + skipped_ui,
+                skipped_resolved=skipped_resolved + skipped_platform + skipped_ui + skipped_manual,
                 marked_manual=marked_manual,
                 requeued_failed=requeued_failed,
             )
             LOGGER.info(
                 "Polled %s: total=%s unresolved=%s queued=%s existing=%s resolved=%s manual=%s "
-                "platform_skipped=%s ui_skipped=%s",
+                "platform_skipped=%s ui_skipped=%s manual_tag_skipped=%s",
                 project.name,
                 total,
                 unresolved_count,
@@ -217,6 +223,7 @@ class Poller:
                 marked_manual,
                 skipped_platform,
                 skipped_ui,
+                skipped_manual,
             )
         except Exception as exc:
             self.state.record_poll_run(
@@ -229,7 +236,7 @@ class Poller:
                 candidate_bugs=candidate_count,
                 queued_bugs=queued,
                 skipped_existing=skipped_existing,
-                skipped_resolved=skipped_resolved + skipped_platform + skipped_ui,
+                skipped_resolved=skipped_resolved + skipped_platform + skipped_ui + skipped_manual,
                 marked_manual=marked_manual,
                 requeued_failed=requeued_failed,
                 error=str(exc),

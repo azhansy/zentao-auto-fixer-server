@@ -41,13 +41,14 @@ from .git_ops import (
 )
 from .cable_release import check_cable_release, is_cable_release
 from .gitlab import GitLab, GitLabError, required_jobs_pass, required_jobs_present
-from .models import ProjectConfig, RunRecord, has_ui_tag, platforms_of
+from .models import ProjectConfig, RunRecord, has_manual_tag, has_ui_tag, platforms_of
 from .state import StateStore
 from .zentao import (
     ZenTaoPollError,
     ZenTaoResolveError,
     ZenTaoWriteError,
     add_comment,
+    bug_fresh_title,
     bug_is_still_actionable,
     bug_view_url,
     comment_bug,
@@ -66,6 +67,7 @@ _FOLLOWING_DONE_TEXT = {
     "pushed": "修复成功，已提交交付",
     "failed": "处理失败",
     "skipped_ui": "跳过（UI 问题）",
+    "skipped_manual": "跳过（人工处理）",
     "skipped_stale": "跳过（无需处理）",
     "skipped_platform": "跳过（平台不在配置内）",
     "unable_to_fix": "AI 无法自动修复",
@@ -201,7 +203,7 @@ class Worker:
             LOGGER.error("Worker cannot start bug #%s: %s", bug_id, message)
             return
 
-        if has_ui_tag(run.title) and not project.process_ui_bugs:
+        if not project.process_ui_bugs and has_ui_tag(self._fresh_title_or_old(run)):
             message = "标题带有 UI 标签，当前项目 processUiBugs=false，未调用 AI。"
             self.state.update_status(
                 bug_id,
@@ -212,6 +214,18 @@ class Worker:
             )
             self.state.record_run_event(bug_id, "skipped_ui", message)
             LOGGER.info("Bug #%s skipped because its title carries a UI tag", bug_id)
+            return
+        if has_manual_tag(self._fresh_title_or_old(run)):
+            message = "标题带有人工标签，未调用 AI。"
+            self.state.update_status(
+                bug_id,
+                "skipped_manual",
+                error=message,
+                handled_once=False,
+                completed=True,
+            )
+            self.state.record_run_event(bug_id, "skipped_manual", message)
+            LOGGER.info("Bug #%s skipped because its title carries a manual tag", bug_id)
             return
 
         stale = self._stale_reason(run)
@@ -254,6 +268,14 @@ class Worker:
                 "missing": f"请按端拆成多条 Bug（{named} 各一条），每条只写该端的复现步骤和现象。",
             },
         )
+
+    def _fresh_title_or_old(self, run: RunRecord) -> str:
+        """Humans edit titles (e.g. add a 【ui】 tag) after the bug was queued; re-read before the UI gate."""
+        try:
+            return bug_fresh_title(self.settings.zentao_client_script, run.bug_id) or run.title
+        except ZenTaoPollError as exc:
+            LOGGER.warning("Could not re-read bug #%s title before the UI check: %s", run.bug_id, exc)
+            return run.title
 
     def _stale_reason(self, run: RunRecord) -> str:
         """A queued bug can sit for hours or survive a restart; re-check ZenTao before spending an agent run."""
@@ -326,7 +348,11 @@ class Worker:
         batch = self.state.claim_queued_batch(leader_bug_id, limit=1)
         if not batch:
             return
-        skipped_ui = [run for run in batch if has_ui_tag(run.title) and not project.process_ui_bugs]
+        fresh_titles = {run.bug_id: self._fresh_title_or_old(run) for run in batch}
+        skipped_ui = [
+            run for run in batch
+            if has_ui_tag(fresh_titles[run.bug_id]) and not project.process_ui_bugs
+        ]
         for run in skipped_ui:
             message = "标题带有 UI 标签，当前项目 processUiBugs=false，未调用 AI。"
             self.state.update_status(
@@ -338,6 +364,20 @@ class Worker:
             )
             self.state.record_run_event(run.bug_id, "skipped_ui", message)
         batch = [run for run in batch if run not in skipped_ui]
+        if not batch:
+            return
+        skipped_manual = [run for run in batch if has_manual_tag(fresh_titles[run.bug_id])]
+        for run in skipped_manual:
+            message = "标题带有人工标签，未调用 AI。"
+            self.state.update_status(
+                run.bug_id,
+                "skipped_manual",
+                error=message,
+                handled_once=False,
+                completed=True,
+            )
+            self.state.record_run_event(run.bug_id, "skipped_manual", message)
+        batch = [run for run in batch if run not in skipped_manual]
         if not batch:
             return
         first = batch[0]

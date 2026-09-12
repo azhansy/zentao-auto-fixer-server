@@ -141,6 +141,81 @@ class FollowingNotesTests(unittest.TestCase):
         self.assertIn("跳过（无需处理）", text)
         self.assertIn("原因：ZenTao status is now 'resolved', not active", text)
 
+    def test_fresh_title_preferred_over_queued_title(self):
+        worker, state = self._worker()
+        run = SimpleNamespace(bug_id=7, title="【ios】旧标题")
+        with mock.patch("zentao_auto_fixer.worker.bug_fresh_title", return_value="【ui】【ios】新标题"):
+            self.assertEqual(worker._fresh_title_or_old(run), "【ui】【ios】新标题")
+
+    def test_fresh_title_falls_back_to_old_on_read_error(self):
+        worker, state = self._worker()
+        run = SimpleNamespace(bug_id=7, title="【ios】旧标题")
+        with mock.patch("zentao_auto_fixer.worker.bug_fresh_title", side_effect=ZenTaoPollError("boom")):
+            self.assertEqual(worker._fresh_title_or_old(run), "【ios】旧标题")
+
+    def test_ui_tag_added_after_queuing_is_skipped_before_any_note(self):
+        worker, state = self._worker()
+        settings = SimpleNamespace(
+            worker_count=1,
+            zentao_client_script=Path("/tmp/z.py"),
+            validate_for_worker=lambda: None,
+            load_projects=lambda: [
+                SimpleNamespace(name="p", process_ui_bugs=False)
+            ],
+        )
+        worker.settings = settings
+        state.get_run.return_value = SimpleNamespace(
+            bug_id=7, title="【ios】旧标题（无 ui）", status="queued", project_name="p"
+        )
+        with mock.patch("zentao_auto_fixer.worker.bug_fresh_title", return_value="【ui】【ios】新标题"), mock.patch(
+            "zentao_auto_fixer.worker.add_comment"
+        ) as add:
+            worker._process_bug(7)
+        state.update_status.assert_called_once_with(
+            7,
+            "skipped_ui",
+            error="标题带有 UI 标签，当前项目 processUiBugs=false，未调用 AI。",
+            handled_once=False,
+            completed=True,
+        )
+        add.assert_not_called()
+
+    def test_manual_tag_added_after_queuing_is_skipped_before_any_note(self):
+        worker, state = self._worker()
+        settings = SimpleNamespace(
+            worker_count=1,
+            zentao_client_script=Path("/tmp/z.py"),
+            validate_for_worker=lambda: None,
+            load_projects=lambda: [
+                SimpleNamespace(name="p", process_ui_bugs=False)
+            ],
+        )
+        worker.settings = settings
+        state.get_run.return_value = SimpleNamespace(
+            bug_id=7, title="【ios】旧标题（无标签）", status="queued", project_name="p"
+        )
+        with mock.patch("zentao_auto_fixer.worker.bug_fresh_title", return_value="【人工】【ios】新标题"), mock.patch(
+            "zentao_auto_fixer.worker.add_comment"
+        ) as add:
+            worker._process_bug(7)
+        state.update_status.assert_called_once_with(
+            7,
+            "skipped_manual",
+            error="标题带有人工标签，未调用 AI。",
+            handled_once=False,
+            completed=True,
+        )
+        add.assert_not_called()
+
+    def test_manual_tag_detection(self):
+        from zentao_auto_fixer.models import has_manual_tag
+
+        self.assertTrue(has_manual_tag("【人工】【ios】标题"))
+        self.assertTrue(has_manual_tag("[人工] 标题"))
+        self.assertTrue(has_manual_tag("【 人工 】标题"))
+        self.assertFalse(has_manual_tag("【ios】标题"))
+        self.assertFalse(has_manual_tag("人工处理一下这个 bug"))
+
     def test_run_finally_posts_done_after_unhandled_error(self):
         worker, state = self._worker()
         state.get_run.return_value = SimpleNamespace(bug_id=7, status="failed")

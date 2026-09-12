@@ -97,6 +97,12 @@ def _has_ai_marker(detail: Dict[str, Any]) -> bool:
     )
 
 
+def bug_fresh_title(client_script: Path, bug_id: int) -> str:
+    """The queued title can be hours old; humans may have edited it (e.g. added a 【ui】 tag)."""
+    detail = _bug_detail(client_script, bug_id)
+    return str(detail.get("title") or "").strip()
+
+
 def bug_is_still_actionable(
     client_script: Path,
     bug_id: int,
