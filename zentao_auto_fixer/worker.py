@@ -167,6 +167,8 @@ class Worker:
         if not run or run.status in _FOLLOWING_STILL_ACTIVE:
             return
         text = f"【AI 跟进完成】AI 已结束对本 Bug 的跟进，本轮结果：{_FOLLOWING_DONE_TEXT.get(run.status, run.status)}。"
+        if run.status == "unable_to_fix" and run.error:
+            text += f"\n原因：{run.error}"
         try:
             add_comment(self.settings.zentao_client_script, run.bug_id, text)
             self.state.record_run_event(run.bug_id, "following_done", run.status)
