@@ -523,10 +523,25 @@ class CallSiteTests(unittest.TestCase):
         from zentao_auto_fixer.agent_runner import _agent_credential_failure
 
         self.assertTrue(_agent_credential_failure('"result":"API Error: 402 Insufficient Balance"'))
-        self.assertTrue(_agent_credential_failure("[claude-code:unrecognized_model] {\"model\":\"deepseek-v4-pro[1m]\"}"))
+        self.assertTrue(
+            _agent_credential_failure(
+                '[claude-code:unrecognized_model] {"model":"deepseek-v4-pro[1m]","query_source":"sdk"}'
+            )
+        )
         self.assertTrue(_agent_credential_failure("invalid api key provided"))
         self.assertFalse(_agent_credential_failure("测试用例跑挂了：1 tests failed"))
         self.assertFalse(_agent_credential_failure("you've hit your limit, usage limit reached"))
+
+    def test_session_title_warning_is_not_a_credential_failure(self):
+        from zentao_auto_fixer.agent_runner import _agent_credential_failure
+
+        # 每次运行都会出现的无害警告：标题生成用的 flash 模型不被识别，主任务不受影响
+        harmless = (
+            '⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set\n'
+            '[claude-code:unrecognized_model] {"model":"deepseek-flash","query_source":"generate_session_title"}'
+        )
+        self.assertFalse(_agent_credential_failure(harmless))
+        self.assertFalse(_agent_credential_failure(harmless + "\n测试失败：2 tests failed"))
 
     def test_batch_failure_stays_local_instead_of_writing_zentao(self):
         from types import SimpleNamespace

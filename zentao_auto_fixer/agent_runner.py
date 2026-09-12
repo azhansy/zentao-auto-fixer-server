@@ -393,18 +393,22 @@ def _agent_env(env_overrides: Optional[Dict[str, str]]) -> Dict[str, str]:
 
 
 def _agent_credential_failure(output: str) -> bool:
-    """Dead token / empty balance show up as 402 or unrecognized_model, not as a model misbehaving."""
+    """Dead token / empty balance show up as 402 or a main-request unrecognized_model.
+
+    The generate_session_title warning (flash model not recognized) is harmless and appears on
+    every run; only the sdk query source failing to recognize the model is a credential signal.
+    """
     normalized = " ".join((output or "").casefold().split())
+    sdk_unrecognized = '"query_source":"sdk"' in normalized and "unrecognized_model" in normalized
     markers = (
         "insufficient balance",
-        "unrecognized_model",
         "invalid api key",
         "401 unauthorized",
         "authentication error",
         '"api_error_status":402',
         "payment required",
     )
-    return any(marker in normalized for marker in markers)
+    return sdk_unrecognized or any(marker in normalized for marker in markers)
 
 
 def _agent_quota_exhausted(agent: str, output: str) -> bool:
