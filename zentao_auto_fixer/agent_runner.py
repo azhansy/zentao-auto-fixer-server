@@ -138,6 +138,7 @@ def _batch_prompt(
         if conflict_context
         else ""
     )
+    zentao_file_script = Path(__file__).resolve().parent.parent / "scripts" / "zentao_file.py"
     return f"""在同一个批次内先分诊、再修复以下禅道 Bugs：{bug_ids}。
 {conflict_instruction}
 
@@ -150,6 +151,8 @@ Bug 列表：
 要求：
 1. 逐个 Bug 先做分诊。读禅道详情只允许用这一条只读命令，不要用别的方式访问禅道：
    python3 {zentao_client_script} bug <bugID>
+   详情里步骤/结果中引用的截图附件（file-read-*.jpg 等 URL）可以用下面这条命令下载后查看（除此之外不要用别的方式访问禅道）：
+   python3 {zentao_file_script} <截图URL> <本地输出路径>
 2. 默认先从 app 入手；确认是后端问题就改 backend；app 和 backend 都要改就一起改。
 3. 如果读完详情仍然判断不出是什么问题（描述不足、无法定位到代码），不要猜着改，把这个 Bug 标记为 rejected。
    标记 rejected 之前，必须把你为它做过的试探性改动全部还原，不能留在工作区里。
