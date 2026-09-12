@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from zentao_auto_fixer.worker import _FOLLOWING_START_TEXT, Worker
-from zentao_auto_fixer.zentao import ZenTaoWriteError
+from zentao_auto_fixer.zentao import ZenTaoPollError, ZenTaoWriteError
 
 
 class FollowingNotesTests(unittest.TestCase):
@@ -85,6 +85,61 @@ class FollowingNotesTests(unittest.TestCase):
         ):
             worker._note_following_done(7)
         state.record_run_event.assert_called_once_with(7, "following_done_failed", "boom")
+
+    def test_writeback_guard_drops_bug_resolved_while_agent_ran(self):
+        worker, state = self._worker()
+        run = SimpleNamespace(bug_id=7, event_action="")
+        with mock.patch(
+            "zentao_auto_fixer.worker.bug_is_still_actionable",
+            return_value=(False, "ZenTao status is now 'resolved', not active"),
+        ):
+            self.assertFalse(worker._still_actionable_before_writeback(run))
+        state.update_status.assert_called_once_with(
+            7, "skipped_stale", error="ZenTao status is now 'resolved', not active", completed=True
+        )
+        state.record_run_event.assert_called_once_with(
+            7, "skipped_stale", "ZenTao status is now 'resolved', not active"
+        )
+
+    def test_writeback_guard_passes_fresh_bug(self):
+        worker, state = self._worker()
+        with mock.patch("zentao_auto_fixer.worker.bug_is_still_actionable", return_value=(True, "")):
+            self.assertTrue(worker._still_actionable_before_writeback(SimpleNamespace(bug_id=7, event_action="")))
+        state.update_status.assert_not_called()
+
+    def test_writeback_guard_fails_open_on_read_error(self):
+        worker, state = self._worker()
+        with mock.patch(
+            "zentao_auto_fixer.worker.bug_is_still_actionable",
+            side_effect=ZenTaoPollError("boom"),
+        ):
+            self.assertTrue(worker._still_actionable_before_writeback(SimpleNamespace(bug_id=7, event_action="")))
+        state.update_status.assert_not_called()
+
+    def test_writeback_one_skips_comment_when_bug_already_handled(self):
+        worker, state = self._worker()
+        run = SimpleNamespace(bug_id=7, commit_hash="app:abc", event_action="")
+        payload = {"cause": "原因", "solution": "方案", "commit_summary": "app:abc"}
+        with mock.patch(
+            "zentao_auto_fixer.worker.bug_is_still_actionable",
+            return_value=(False, "ZenTao bug has been deleted"),
+        ), mock.patch("zentao_auto_fixer.worker.comment_bug") as comment, mock.patch(
+            "zentao_auto_fixer.worker.resolve_bug"
+        ) as resolve:
+            worker._writeback_one(run, payload)
+        comment.assert_not_called()
+        resolve.assert_not_called()
+
+    def test_done_note_carries_reason_for_skipped_stale(self):
+        worker, state = self._worker()
+        state.get_run.return_value = SimpleNamespace(
+            bug_id=7, status="skipped_stale", error="ZenTao status is now 'resolved', not active"
+        )
+        with mock.patch("zentao_auto_fixer.worker.add_comment") as add:
+            worker._note_following_done(7)
+        text = add.call_args.args[2]
+        self.assertIn("跳过（无需处理）", text)
+        self.assertIn("原因：ZenTao status is now 'resolved', not active", text)
 
     def test_run_finally_posts_done_after_unhandled_error(self):
         worker, state = self._worker()

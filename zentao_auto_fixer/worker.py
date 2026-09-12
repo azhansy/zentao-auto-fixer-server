@@ -167,7 +167,7 @@ class Worker:
         if not run or run.status in _FOLLOWING_STILL_ACTIVE:
             return
         text = f"【AI 跟进完成】AI 已结束对本 Bug 的跟进，本轮结果：{_FOLLOWING_DONE_TEXT.get(run.status, run.status)}。"
-        if run.status == "unable_to_fix" and run.error:
+        if run.status in {"unable_to_fix", "skipped_stale"} and run.error:
             text += f"\n原因：{run.error}"
         try:
             add_comment(self.settings.zentao_client_script, run.bug_id, text)
@@ -261,7 +261,7 @@ class Worker:
             actionable, reason = bug_is_still_actionable(
                 self.settings.zentao_client_script,
                 run.bug_id,
-                ignore_ai_comment=run.event_action == "manual_retry",
+                ignore_ai_comment=getattr(run, "event_action", "") == "manual_retry",
             )
         except ZenTaoPollError as exc:
             LOGGER.warning("Could not re-check bug #%s before fixing it: %s", run.bug_id, exc)
@@ -651,6 +651,11 @@ class Worker:
             self.state.record_run_events(bug_ids, "unable_to_fix", detail)
             self._record_no_progress()
             LOGGER.info("Worker finished batch %s with no changes", batch_label)
+            return
+
+        fixed = [run for run in fixed if self._still_actionable_before_writeback(run)]
+        if not fixed:
+            LOGGER.info("Worker skipped batch %s: every bug was handled in ZenTao while the agent ran", batch_label)
             return
 
         commit_message = _commit_message(fixed, verdicts)
@@ -1098,8 +1103,30 @@ class Worker:
             return
         self._writeback_one(run, payload)
 
+    def _still_actionable_before_writeback(self, run: RunRecord) -> bool:
+        """The agent may have run for an hour; a human could have resolved or deleted the bug meanwhile."""
+        try:
+            actionable, reason = bug_is_still_actionable(
+                self.settings.zentao_client_script,
+                run.bug_id,
+                ignore_ai_comment=getattr(run, "event_action", "") == "manual_retry",
+            )
+        except ZenTaoPollError as exc:
+            # ponytail: fail-open — a transient read error must not eat a finished fix;
+            # the human-race window it leaves is seconds, not the hour this check removes.
+            LOGGER.warning("Could not re-check bug #%s before writing back: %s", run.bug_id, exc)
+            return True
+        if not actionable:
+            self.state.update_status(run.bug_id, "skipped_stale", error=reason, completed=True)
+            self.state.record_run_event(run.bug_id, "skipped_stale", reason)
+            LOGGER.info("Bug #%s was handled in ZenTao while the agent ran (%s); dropping the fix", run.bug_id, reason)
+            return False
+        return True
+
     def _writeback_one(self, run: RunRecord, payload: Dict[str, str]) -> None:
         commit_summary = payload.get("commit_summary") or run.commit_hash
+        if not self._still_actionable_before_writeback(run):
+            return
         self.state.record_run_event(run.bug_id, "comment_start", commit_summary)
         try:
             comment_bug(
