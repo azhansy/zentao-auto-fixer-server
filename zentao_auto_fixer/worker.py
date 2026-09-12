@@ -99,6 +99,7 @@ class Worker:
         self._budget_guard = threading.Lock()
         self._agent_runs_day = ""
         self._agent_runs_today = 0
+        self._credential_pause_until = 0.0
 
     def start(self) -> None:
         if self._threads:
@@ -143,7 +144,7 @@ class Worker:
             except Exception as exc:
                 run = self.state.get_run(bug_id)
                 if run and (run.status == "running" or run.status == "queued"):
-                    self._fail_batch([run], "failed", str(exc), "")
+                    self._fail_batch([run], "failed", _friendly_error(exc), "")
                 LOGGER.exception("Worker failed bug #%s", bug_id)
             finally:
                 with self._queue_guard:
@@ -314,6 +315,8 @@ class Worker:
 
     def _claim_agent_budget(self) -> bool:
         """One batch costs one agent run. The ceiling is the backstop against a runaway poll loop."""
+        if time.time() < self._credential_pause_until:
+            return False
         today = datetime.now().astimezone().date().isoformat()
         if self.state.daily_counter_value(self._no_progress_counter_name(), today) >= 3:
             return False
@@ -334,6 +337,8 @@ class Worker:
         return claimed
 
     def _agent_budget_block_reason(self) -> str:
+        if time.time() < self._credential_pause_until:
+            return "AI 服务凭证失效或余额不足，暂停新任务；恢复后会自动继续。"
         today = datetime.now().astimezone().date().isoformat()
         if self.state.daily_counter_value(self._no_progress_counter_name(), today) >= 3:
             return "Three consecutive AI runs produced no pushed fix; paused until tomorrow."
@@ -487,8 +492,10 @@ class Worker:
             unfinished = [run for run in batch if _still_running(self.state, run.bug_id)]
             # Auth/balance failures are not the AI's fault: don't count them toward the
             # no-progress fuse, and clear earlier counts so a restored token resumes work.
+            # Pause new starts for a while so a dead token does not spam failure notes per retry.
             self._fail_batch(unfinished, "failed", _friendly_error(exc), "", count_no_progress=False)
             self._record_progress()
+            self._credential_pause_until = time.time() + 900
             LOGGER.exception("Worker failed batch %s on a credential error", batch_label)
         except Exception as exc:
             unfinished = [run for run in batch if _still_running(self.state, run.bug_id)]

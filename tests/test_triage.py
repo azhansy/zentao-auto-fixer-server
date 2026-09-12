@@ -501,6 +501,24 @@ class CallSiteTests(unittest.TestCase):
         self.assertIn("AI 引擎执行失败", _friendly_error(AgentError("claude failed with exit 1")))
         self.assertEqual(_friendly_error(RuntimeError("boom")), "boom")
 
+    def test_credential_failure_pauses_new_starts_for_a_while(self):
+        from types import SimpleNamespace
+
+        from zentao_auto_fixer.agent_runner import AgentCredentialError
+        from zentao_auto_fixer.worker import Worker
+
+        state = mock.Mock()
+        state.daily_counter_value.return_value = 0
+        state.claim_daily_counter.return_value = True
+        worker = Worker(SimpleNamespace(worker_count=1, max_agent_runs_per_day=10), state)
+
+        self.assertTrue(worker._claim_agent_budget())
+        worker._credential_pause_until = __import__("time").time() + 900
+        self.assertFalse(worker._claim_agent_budget())
+        self.assertIn("凭证失效或余额不足", worker._agent_budget_block_reason())
+        worker._credential_pause_until = __import__("time").time() - 1
+        self.assertTrue(worker._claim_agent_budget())
+
     def test_agent_credential_failure_marks_402_and_unrecognized_model(self):
         from zentao_auto_fixer.agent_runner import _agent_credential_failure
 
