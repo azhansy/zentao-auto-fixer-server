@@ -91,6 +91,18 @@ class FollowingNotesTests(unittest.TestCase):
         self.assertIn("处理失败", text)
         self.assertIn("原因：claude failed with exit 1: boom", text)
 
+    def test_done_note_reason_is_truncated_to_120_chars(self):
+        worker, state = self._worker()
+        state.get_run.return_value = SimpleNamespace(
+            bug_id=7, status="unable_to_fix", error="长原因" * 100
+        )
+        with mock.patch("zentao_auto_fixer.worker.add_comment") as add:
+            worker._note_following_done(7)
+        text = add.call_args.args[2]
+        self.assertIn("原因：", text)
+        self.assertLessEqual(len(text), 150)  # 截断到 120 字 + 模板开销
+        self.assertTrue(text.rstrip().endswith("…"))
+
     def test_done_note_without_reason_stays_one_line(self):
         worker, state = self._worker()
         state.get_run.return_value = SimpleNamespace(bug_id=7, status="unable_to_fix", error="")
