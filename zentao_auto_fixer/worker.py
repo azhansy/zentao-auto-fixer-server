@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .agent_runner import (
+    AgentCredentialError,
     AgentError,
     AgentQuotaError,
     TriageResultError,
@@ -479,6 +480,13 @@ class Worker:
                     project.agent,
                     project.allow_full_xcodebuild,
                 )
+        except AgentCredentialError as exc:
+            unfinished = [run for run in batch if _still_running(self.state, run.bug_id)]
+            # Auth/balance failures are not the AI's fault: don't count them toward the
+            # no-progress fuse, and clear earlier counts so a restored token resumes work.
+            self._fail_batch(unfinished, "failed", str(exc), "", count_no_progress=False)
+            self._record_progress()
+            LOGGER.exception("Worker failed batch %s on a credential error", batch_label)
         except Exception as exc:
             unfinished = [run for run in batch if _still_running(self.state, run.bug_id)]
             if self._stop.is_set():
@@ -620,6 +628,14 @@ class Worker:
                     agent_log,
                     allow_full_xcodebuild=allow_full_xcodebuild,
                 )
+            except AgentCredentialError as exc:
+                last_error = exc
+                self.state.record_run_events(
+                    bug_ids,
+                    "agent_attempt_failed",
+                    f"{agent} {attempt}/{self.settings.codex_attempts}: {exc}",
+                )
+                break  # retrying cannot fix a dead token
             except (AgentError, TriageResultError) as exc:
                 last_error = exc
                 self.state.record_run_events(
@@ -909,6 +925,8 @@ class Worker:
                                 "Conflict resolver modified unrelated repositories: " + ", ".join(touched_others)
                             )
                         continue_rebase(checkout.worktree, timeout=self.settings.git_timeout_seconds)
+                    except AgentCredentialError:
+                        raise
                     except Exception as retry_error:
                         self.state.record_run_events(
                             bug_ids, f"conflict_agent_retry_{checkout.kind}", str(retry_error)

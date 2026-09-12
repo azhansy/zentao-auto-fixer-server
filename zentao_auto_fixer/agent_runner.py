@@ -22,6 +22,9 @@ class AgentQuotaError(AgentError):
     pass
 
 
+class AgentCredentialError(AgentError):
+    """Auth/balance failures (dead token, empty balance): not the AI's fault, retrying cannot fix them."""
+
 
 class TriageResultError(RuntimeError):
     pass
@@ -352,6 +355,8 @@ def _run_agent(
     if timed_out:
         raise AgentError(f"{agent} timed out after {timeout_seconds}s:\n{output}")
     if return_code != 0:
+        if _agent_credential_failure(output):
+            raise AgentCredentialError(f"{agent} credential/auth failure:\n{output}")
         if _agent_quota_exhausted(agent, output):
             raise AgentQuotaError(f"{agent} quota exhausted:\n{output}")
         raise AgentError(f"{agent} failed with exit {return_code}:\n{output}")
@@ -382,6 +387,21 @@ def _agent_env(env_overrides: Optional[Dict[str, str]]) -> Dict[str, str]:
     env.pop("AUTO_FIXER_GITLAB_TOKEN", None)
     env.pop("AUTO_FIXER_GITLAB_TOKEN_FILE", None)
     return env
+
+
+def _agent_credential_failure(output: str) -> bool:
+    """Dead token / empty balance show up as 402 or unrecognized_model, not as a model misbehaving."""
+    normalized = " ".join((output or "").casefold().split())
+    markers = (
+        "insufficient balance",
+        "unrecognized_model",
+        "invalid api key",
+        "401 unauthorized",
+        "authentication error",
+        '"api_error_status":402',
+        "payment required",
+    )
+    return any(marker in normalized for marker in markers)
 
 
 def _agent_quota_exhausted(agent: str, output: str) -> bool:

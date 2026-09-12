@@ -451,6 +451,55 @@ class CallSiteTests(unittest.TestCase):
         )
         state.record_run_event.assert_called_once_with(1, "failed", "boom")
 
+    def test_credential_failure_does_not_count_toward_no_progress_fuse(self):
+        from types import SimpleNamespace
+
+        from zentao_auto_fixer.agent_runner import AgentCredentialError
+        from zentao_auto_fixer.worker import Worker
+
+        run = SimpleNamespace(
+            bug_id=1,
+            title="bug",
+            project_name="p",
+            target_branch="dev",
+            repo_url="repo",
+        )
+        state = mock.Mock()
+        state.claim_queued_batch.return_value = [run]
+        state.get_run.return_value = SimpleNamespace(status="running")
+        state.list_run_events.return_value = []
+        worker = Worker(
+            SimpleNamespace(worker_count=1, zentao_client_script=Path("/tmp/z.py"), logs_dir=Path("/tmp")), state
+        )
+        worker._prepare_checkout = mock.Mock()
+        worker._fail_batch = mock.Mock()
+        worker._record_progress = mock.Mock()
+        worker._run_agent_batch_with_retries = mock.Mock(side_effect=AgentCredentialError("402 Insufficient Balance"))
+        project = SimpleNamespace(
+            max_bugs_per_poll=3,
+            process_ui_bugs=False,
+            has_backend_repo=False,
+            delivery_mode="push",
+            agent="claude",
+            fallback_agent="",
+            allow_full_xcodebuild=False,
+        )
+
+        with mock.patch("zentao_auto_fixer.worker.add_comment"):
+            worker._process_batch(1, project)
+
+        worker._fail_batch.assert_called_once_with([run], "failed", mock.ANY, "", count_no_progress=False)
+        worker._record_progress.assert_called_once()
+
+    def test_agent_credential_failure_marks_402_and_unrecognized_model(self):
+        from zentao_auto_fixer.agent_runner import _agent_credential_failure
+
+        self.assertTrue(_agent_credential_failure('"result":"API Error: 402 Insufficient Balance"'))
+        self.assertTrue(_agent_credential_failure("[claude-code:unrecognized_model] {\"model\":\"deepseek-v4-pro[1m]\"}"))
+        self.assertTrue(_agent_credential_failure("invalid api key provided"))
+        self.assertFalse(_agent_credential_failure("测试用例跑挂了：1 tests failed"))
+        self.assertFalse(_agent_credential_failure("you've hit your limit, usage limit reached"))
+
     def test_batch_failure_stays_local_instead_of_writing_zentao(self):
         from types import SimpleNamespace
 
