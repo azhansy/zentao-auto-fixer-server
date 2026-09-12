@@ -188,8 +188,11 @@ class Worker:
         if not run or run.status in _FOLLOWING_STILL_ACTIVE:
             return
         text = f"【AI 跟进完成】AI 已结束对本 Bug 的跟进，本轮结果：{_FOLLOWING_DONE_TEXT.get(run.status, run.status)}。"
-        if run.status in {"unable_to_fix", "skipped_stale"} and run.error:
-            text += f"\n原因：{run.error}"
+        if getattr(run, "error", ""):
+            detail = str(run.error).strip()
+            if len(detail) > 300:
+                detail = detail[:300].rstrip() + "…"
+            text += f"\n原因：{detail}"
         try:
             add_comment(self.settings.zentao_client_script, run.bug_id, text)
             self.state.record_run_event(run.bug_id, "following_done", run.status)

@@ -80,6 +80,17 @@ class FollowingNotesTests(unittest.TestCase):
         self.assertIn("AI 无法自动修复", text)
         self.assertIn("原因：AI 无法从当前 Bug 描述定位到问题。 需要补充：复现步骤。", text)
 
+    def test_done_note_carries_reason_for_failed(self):
+        worker, state = self._worker()
+        state.get_run.return_value = SimpleNamespace(
+            bug_id=7, status="failed", error="claude failed with exit 1: boom"
+        )
+        with mock.patch("zentao_auto_fixer.worker.add_comment") as add:
+            worker._note_following_done(7)
+        text = add.call_args.args[2]
+        self.assertIn("处理失败", text)
+        self.assertIn("原因：claude failed with exit 1: boom", text)
+
     def test_done_note_without_reason_stays_one_line(self):
         worker, state = self._worker()
         state.get_run.return_value = SimpleNamespace(bug_id=7, status="unable_to_fix", error="")
