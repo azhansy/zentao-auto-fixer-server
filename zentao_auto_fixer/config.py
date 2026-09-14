@@ -82,7 +82,7 @@ class Settings:
             # retry_exhausted，没有任何自动恢复路径（见 2026-09-03 那次连锁失败）。
             max_bug_retries=max(1, int(os.getenv("AUTO_FIXER_MAX_BUG_RETRIES", "4"))),
             zentao_client_script=_zentao_client_script_from_env(),
-            git_timeout_seconds=max(30, int(os.getenv("AUTO_FIXER_GIT_TIMEOUT_SECONDS", "1800"))),
+            git_timeout_seconds=max(30, int(os.getenv("AUTO_FIXER_GIT_TIMEOUT_SECONDS", "900"))),
             git_shallow_clone=_bool_env("AUTO_FIXER_GIT_SHALLOW_CLONE", True),
             git_author_name=os.getenv("GIT_AUTHOR_NAME", "Zentao Auto Fixer"),
             git_author_email=os.getenv("GIT_AUTHOR_EMAIL", "zentao-auto-fixer@example.com"),

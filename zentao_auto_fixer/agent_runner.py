@@ -358,7 +358,7 @@ def _run_agent(
     if timed_out:
         raise AgentError(f"{agent} timed out after {timeout_seconds}s:\n{output}")
     if return_code != 0:
-        if _agent_credential_failure(output):
+        if _agent_credential_failure(agent, output):
             raise AgentCredentialError(f"{agent} credential/auth failure:\n{output}")
         if _agent_quota_exhausted(agent, output):
             raise AgentQuotaError(f"{agent} quota exhausted:\n{output}")
@@ -392,14 +392,19 @@ def _agent_env(env_overrides: Optional[Dict[str, str]]) -> Dict[str, str]:
     return env
 
 
-def _agent_credential_failure(output: str) -> bool:
+def _agent_credential_failure(agent: str, output: str) -> bool:
     """Dead token / empty balance show up as 402 or a main-request unrecognized_model.
 
     The generate_session_title warning (flash model not recognized) is harmless and appears on
-    every run; only the sdk query source failing to recognize the model is a credential signal.
+    every run; only the sdk query source failing to recognize the model is a credential signal,
+    and that wording is claude-specific. The generic markers apply to any agent.
     """
     normalized = " ".join((output or "").casefold().split())
-    sdk_unrecognized = '"query_source":"sdk"' in normalized and "unrecognized_model" in normalized
+    sdk_unrecognized = (
+        agent == "claude"
+        and '"query_source":"sdk"' in normalized
+        and "unrecognized_model" in normalized
+    )
     markers = (
         "insufficient balance",
         "invalid api key",

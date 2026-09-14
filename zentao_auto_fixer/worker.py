@@ -250,6 +250,9 @@ class Worker:
             return
 
         stale = self._stale_reason(run)
+        if stale is None:
+            LOGGER.info("Bug #%s skipped this round: cannot re-check ZenTao; it stays queued", bug_id)
+            return
         if stale:
             self.state.update_status(bug_id, "skipped_stale", error=stale, completed=True)
             self.state.record_run_event(bug_id, "skipped_stale", stale)
@@ -298,8 +301,13 @@ class Worker:
             LOGGER.warning("Could not re-read bug #%s title before the UI check: %s", run.bug_id, exc)
             return run.title
 
-    def _stale_reason(self, run: RunRecord) -> str:
-        """A queued bug can sit for hours or survive a restart; re-check ZenTao before spending an agent run."""
+    def _stale_reason(self, run: RunRecord) -> Optional[str]:
+        """A queued bug can sit for hours or survive a restart; re-check ZenTao before spending an agent run.
+
+        Returns "" when the bug is actionable, a reason when it is definitively stale, and None
+        when ZenTao could not be read (outage): skip this round without touching the status, so
+        a network blip never burns the retry budget toward retry_exhausted.
+        """
         try:
             actionable, reason = bug_is_still_actionable(
                 self.settings.zentao_client_script,
@@ -308,7 +316,7 @@ class Worker:
             )
         except ZenTaoPollError as exc:
             LOGGER.warning("Could not re-check bug #%s before fixing it: %s", run.bug_id, exc)
-            return f"Could not confirm the bug is still active: {exc}"
+            return None
         return "" if actionable else reason
 
     def _claim_agent_budget(self) -> bool:

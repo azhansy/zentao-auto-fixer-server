@@ -522,15 +522,24 @@ class CallSiteTests(unittest.TestCase):
     def test_agent_credential_failure_marks_402_and_unrecognized_model(self):
         from zentao_auto_fixer.agent_runner import _agent_credential_failure
 
-        self.assertTrue(_agent_credential_failure('"result":"API Error: 402 Insufficient Balance"'))
+        self.assertTrue(_agent_credential_failure("claude", '"result":"API Error: 402 Insufficient Balance"'))
         self.assertTrue(
             _agent_credential_failure(
-                '[claude-code:unrecognized_model] {"model":"deepseek-v4-pro[1m]","query_source":"sdk"}'
+                "claude",
+                '[claude-code:unrecognized_model] {"model":"deepseek-v4-pro[1m]","query_source":"sdk"}',
             )
         )
-        self.assertTrue(_agent_credential_failure("invalid api key provided"))
-        self.assertFalse(_agent_credential_failure("测试用例跑挂了：1 tests failed"))
-        self.assertFalse(_agent_credential_failure("you've hit your limit, usage limit reached"))
+        self.assertTrue(_agent_credential_failure("claude", "invalid api key provided"))
+        self.assertFalse(_agent_credential_failure("claude", "测试用例跑挂了：1 tests failed"))
+        self.assertFalse(_agent_credential_failure("claude", "you've hit your limit, usage limit reached"))
+        # 通用标记对任何 agent 生效；claude 专属的 sdk 特征对 codex 不生效
+        self.assertTrue(_agent_credential_failure("codex", "insufficient balance"))
+        self.assertFalse(
+            _agent_credential_failure(
+                "codex",
+                '[claude-code:unrecognized_model] {"model":"deepseek-v4-pro[1m]","query_source":"sdk"}',
+            )
+        )
 
     def test_session_title_warning_is_not_a_credential_failure(self):
         from zentao_auto_fixer.agent_runner import _agent_credential_failure
@@ -540,8 +549,55 @@ class CallSiteTests(unittest.TestCase):
             '⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set\n'
             '[claude-code:unrecognized_model] {"model":"deepseek-flash","query_source":"generate_session_title"}'
         )
-        self.assertFalse(_agent_credential_failure(harmless))
-        self.assertFalse(_agent_credential_failure(harmless + "\n测试失败：2 tests failed"))
+        self.assertFalse(_agent_credential_failure("claude", harmless))
+        self.assertFalse(_agent_credential_failure("claude", harmless + "\n测试失败：2 tests failed"))
+
+    def test_unreadable_zentao_leaves_bug_queued_without_burning_retries(self):
+        from types import SimpleNamespace
+
+        from zentao_auto_fixer.worker import Worker
+        from zentao_auto_fixer.zentao import ZenTaoPollError
+
+        state = mock.Mock()
+        state.get_run.return_value = SimpleNamespace(
+            bug_id=1, title="bug", project_name="p", target_branch="dev", repo_url="repo", status="queued"
+        )
+        state.list_run_events.return_value = []
+        worker = Worker(
+            SimpleNamespace(
+                worker_count=1,
+                zentao_client_script=Path("/tmp/z.py"),
+                validate_for_worker=lambda: None,
+                load_projects=lambda: [
+                    SimpleNamespace(name="p", process_ui_bugs=False)
+                ],
+            ),
+            state,
+        )
+        worker._fresh_title_or_old = mock.Mock(return_value="bug")
+        worker._stale_reason = mock.Mock(return_value=None)  # 禅州不可达
+        worker._claim_agent_budget = mock.Mock()
+
+        worker._process_bug(1)
+
+        # 不改状态、不消耗任何东西：bug 留在队列，下一轮 poll 再试
+        state.update_status.assert_not_called()
+        state.record_run_event.assert_not_called()
+        worker._claim_agent_budget.assert_not_called()
+
+    def test_stale_reason_returns_none_when_zentao_is_unreachable(self):
+        from types import SimpleNamespace
+
+        from zentao_auto_fixer.worker import Worker
+        from zentao_auto_fixer.zentao import ZenTaoPollError
+
+        state = mock.Mock()
+        worker = Worker(SimpleNamespace(worker_count=1, zentao_client_script=Path("/tmp/z.py")), state)
+        run = SimpleNamespace(bug_id=1, event_action="")
+        with mock.patch(
+            "zentao_auto_fixer.worker.bug_is_still_actionable", side_effect=ZenTaoPollError("network down")
+        ):
+            self.assertIsNone(worker._stale_reason(run))
 
     def test_batch_failure_stays_local_instead_of_writing_zentao(self):
         from types import SimpleNamespace
