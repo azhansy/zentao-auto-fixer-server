@@ -540,6 +540,16 @@ class CallSiteTests(unittest.TestCase):
                 '[claude-code:unrecognized_model] {"model":"deepseek-v4-pro[1m]","query_source":"sdk"}',
             )
         )
+        # DeepSeek / 中转侧特征：官方 401 文案、OpenAI 风格错误码、token 过期
+        self.assertTrue(
+            _agent_credential_failure(
+                "claude", '{"error":{"message":"Authentication Fails, Your api key: **** is invalid"}}'
+            )
+        )
+        self.assertTrue(
+            _agent_credential_failure("claude", '{"error":{"code":"invalid_api_key"}}')
+        )
+        self.assertTrue(_agent_credential_failure("claude", "token expired, please refresh"))
 
     def test_session_title_warning_is_not_a_credential_failure(self):
         from zentao_auto_fixer.agent_runner import _agent_credential_failure

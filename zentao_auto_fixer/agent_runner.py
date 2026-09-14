@@ -408,8 +408,12 @@ def _agent_credential_failure(agent: str, output: str) -> bool:
     markers = (
         "insufficient balance",
         "invalid api key",
+        "invalid_api_key",
+        "authentication fails",
         "401 unauthorized",
         "authentication error",
+        "token expired",
+        "expired token",
         '"api_error_status":402',
         "payment required",
     )
