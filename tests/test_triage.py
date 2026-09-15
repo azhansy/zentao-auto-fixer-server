@@ -164,6 +164,11 @@ class CommitMessageTests(unittest.TestCase):
         self.assertLessEqual(len(message.split(": ", 1)[1]), 72)
         self.assertTrue(message.endswith("…"))
 
+    def test_raw_bug_path_prefix_is_not_used_as_commit_summary(self):
+        run = _run(7925, "app：ios/App/Sources/Root/CirclloRootView.swift 的 preparePaidEnrollment")
+        message = _commit_message([run], {7925: {}})
+        self.assertEqual(message, "fix(7925): preparePaidEnrollment")
+
     def test_multi_bug_batch_lists_each_bug_on_its_own_line(self):
         runs = [_run(7499, "标题 A"), _run(7500, "标题 B")]
         verdicts = {

@@ -1387,7 +1387,18 @@ def _fix_summary(verdict: Dict[str, Any], title: str) -> str:
     """One line describing the actual fix, for the commit subject — not the raw ZenTao title."""
     text = (verdict.get("solution") or verdict.get("understanding") or title or "").strip()
     text = " ".join(text.split())
+    text = _strip_raw_path_prefix(text)
     limit = 72
     if len(text) > limit:
         text = text[: limit - 1].rstrip() + "…"
     return text or "修复问题"
+
+
+def _strip_raw_path_prefix(text: str) -> str:
+    text = re.sub(r"^(?:app|backend)[：:]\s*", "", text, flags=re.IGNORECASE)
+    return re.sub(
+        r"^(?:(?:ios|android|backend)/)?[\w./-]+\.(?:swift|kt|java|go|ts|tsx|js|jsx|vue)\s*的\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )

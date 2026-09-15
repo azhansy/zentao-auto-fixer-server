@@ -173,7 +173,7 @@ Bug 列表：
        {{"id": 1234, "decision": "fixed", "targets": ["app"], "platform": "ios",
          "understanding": "用一两句话复述你理解的这个 Bug 是什么现象",
          "steps": ["1. 打开某页面", "2. 点击某按钮", "3. 出现什么错误现象"],
-         "cause": "问题原因，一到三句话", "solution": "改了什么，一到三句话",
+         "cause": "问题原因，一到三句话", "solution": "实际改了什么，一到三句话；不要复述 Bug 标题或文件路径",
          "verification": {{"command": "实际同步执行的测试命令", "passed": true}}}},
        {{"id": 1235, "decision": "rejected",
          "understanding": "你理解到的部分，看不懂就写你的猜测",
