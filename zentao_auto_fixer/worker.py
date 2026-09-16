@@ -322,6 +322,8 @@ class Worker:
 
     def _claim_agent_budget(self) -> bool:
         """One batch costs one agent run. The ceiling is the backstop against a runaway poll loop."""
+        if self.state.draining():
+            return False  # 排空（准备重启）：不派新单，在跑的批次不受影响
         if time.time() < self._credential_pause_until:
             return False
         today = datetime.now().astimezone().date().isoformat()
@@ -344,6 +346,8 @@ class Worker:
         return claimed
 
     def _agent_budget_block_reason(self) -> str:
+        if self.state.draining():
+            return "服务正在排空（准备重启），等在跑的批次收尾，暂不派发新任务。"
         if time.time() < self._credential_pause_until:
             return "AI 服务凭证失效或余额不足，暂停新任务；恢复后会自动继续。"
         today = datetime.now().astimezone().date().isoformat()

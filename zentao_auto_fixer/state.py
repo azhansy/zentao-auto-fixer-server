@@ -29,6 +29,24 @@ class StateStore:
         self._lock = threading.Lock()
         self._init_db()
 
+    DRAIN_MAX_AGE_SECONDS = 3600
+
+    def draining(self) -> bool:
+        """排空模式：重启脚本先放这个标志文件，服务就不再派新单，等在跑的批次自然收尾。
+
+        2026-09-16 起用：当天两次为上线重启，每次都把正在跑的 AI 批次打断、各自重跑一遍，
+        白花约半小时 AI 时间。标志文件放在数据目录（和 state.sqlite3 同级），删掉即恢复。
+
+        超过 1 小时的标志按「遗留」处理（脚本被强杀、机器重启都会留下它）：否则服务会
+        静默地一直不派新单，而且没人会想到是这一个文件卡住了。正常排空上限 15 分钟。
+        """
+        flag = self.path.parent / "drain"
+        try:
+            age = time.time() - flag.stat().st_mtime
+        except OSError:
+            return False
+        return age <= self.DRAIN_MAX_AGE_SECONDS
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.path))
         conn.row_factory = sqlite3.Row

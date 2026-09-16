@@ -9,6 +9,62 @@ from unittest import mock
 
 from zentao_auto_fixer.models import BugCandidate, ProjectConfig
 from zentao_auto_fixer.poller import Poller, _is_active
+from zentao_auto_fixer.zentao import ZenTaoPollError, bug_is_active
+
+
+class ActiveCountTests(unittest.TestCase):
+    def test_dashboard_predicate_matches_the_repair_queue_gate(self):
+        """看板的「激活」统计口径必须和修复队列的入口闸一致，两处实现不许跑偏。"""
+        samples = [
+            {},
+            {"status": "active"},
+            {"status": "Active"},
+            {"status": "active", "closedBy": "qa"},
+            {"status": "active", "closedBy": {"account": "qa"}},
+            {"status": "active", "closedBy": {"account": ""}},
+            {"status": "active", "resolvedBy": {"account": "dev"}},
+            {"status": "active", "resolvedBy": ""},
+            {"status": "active", "resolved_by": "dev"},
+            {"status": "resolved"},
+            {"status": "closed"},
+            {"status": "active", "closedBy": 0},
+        ]
+        for raw in samples:
+            bug = _bug(str(raw.get("status") or ""), **{k: v for k, v in raw.items() if k != "status"})
+            self.assertEqual(_is_active(bug), bug_is_active(raw), raw)
+
+    def test_active_count_is_recorded_for_the_dashboard(self):
+        poller, state, worker = _ui_poller(process_ui_bugs=False, max_bugs_per_poll=1)
+
+        with mock.patch("zentao_auto_fixer.poller.list_project_bugs", return_value=[_bug("resolved")]), \
+                mock.patch("zentao_auto_fixer.poller.count_active_bugs", return_value=11) as counter:
+            poller.poll_once()
+
+        counter.assert_called_once()
+        self.assertEqual(state.record_poll_run.call_args.kwargs["active_bugs"], 11)
+
+    def test_active_count_failure_only_degrades_the_statistic(self):
+        poller, state, worker = _ui_poller(process_ui_bugs=False, max_bugs_per_poll=1)
+
+        with mock.patch("zentao_auto_fixer.poller.list_project_bugs", return_value=[_bug("resolved")]), \
+                mock.patch("zentao_auto_fixer.poller.count_active_bugs", side_effect=ZenTaoPollError("禅道读取失败")):
+            poller.poll_once()
+
+        self.assertEqual(state.record_poll_run.call_args.kwargs["active_bugs"], -1)
+
+
+class DrainTests(unittest.TestCase):
+    def test_poll_pauses_while_draining(self):
+        """排空期间不排新单：重启脚本先放 drain 标志，等在跑批次收尾。"""
+        poller, state, worker = _ui_poller(process_ui_bugs=False)
+        state.draining.return_value = True
+
+        with mock.patch("zentao_auto_fixer.poller.list_project_bugs") as lister:
+            poller.poll_once()
+
+        lister.assert_not_called()
+        worker.enqueue.assert_not_called()
+        state.record_poll_run.assert_not_called()
 
 
 class ActiveFilterTests(unittest.TestCase):

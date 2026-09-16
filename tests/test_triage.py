@@ -516,6 +516,7 @@ class CallSiteTests(unittest.TestCase):
         from zentao_auto_fixer.worker import Worker
 
         state = mock.Mock()
+        state.draining.return_value = False
         state.daily_counter_value.return_value = 0
         state.claim_daily_counter.return_value = True
         worker = Worker(SimpleNamespace(worker_count=1, max_agent_runs_per_day=10), state)
@@ -687,6 +688,72 @@ class CallSiteTests(unittest.TestCase):
             "Service stopped; the next start will requeue this batch.",
         )
 
+    def test_draining_stops_new_batches_without_spending_the_daily_budget(self):
+        from types import SimpleNamespace
+
+        from zentao_auto_fixer.worker import Worker
+
+        state = mock.Mock()
+        state.draining.return_value = True
+        settings = SimpleNamespace(
+            max_agent_runs_per_day=20,
+            zentao_client_script=Path("/tmp/z.py"),
+            worker_count=1,
+        )
+        worker = Worker(settings, state)
+
+        self.assertFalse(worker._claim_agent_budget())
+        state.claim_daily_counter.assert_not_called()
+        self.assertIn("排空", worker._agent_budget_block_reason())
+
+    def test_occupied_bug_is_dropped_before_the_takeover_note_goes_out(self):
+        from types import SimpleNamespace
+
+        from zentao_auto_fixer.worker import Worker
+
+        run = SimpleNamespace(bug_id=1, title="bug", project_name="p", target_branch="dev", repo_url="repo")
+        state = mock.Mock()
+        state.claim_queued_batch.return_value = [run]
+        worker = Worker(SimpleNamespace(worker_count=1, zentao_client_script=Path("/tmp/z.py")), state)
+        worker._note_following_started = mock.Mock()
+        worker._prepare_checkout = mock.Mock()
+        project = SimpleNamespace(max_bugs_per_poll=3, process_ui_bugs=False, has_backend_repo=False)
+
+        with mock.patch("zentao_auto_fixer.worker.bug_occupancy", return_value="已被 ermao 占用：xxx"):
+            worker._process_batch(1, project)
+
+        state.update_status.assert_called_once_with(
+            1, "skipped_occupied", error="已被 ermao 占用：xxx", completed=True
+        )
+        # 「请勿人工介入」那条评论贴到别人正在改的单上就是抢单。
+        worker._note_following_started.assert_not_called()
+        worker._prepare_checkout.assert_not_called()
+
+    def test_unreadable_history_keeps_the_bug_for_this_round(self):
+        from types import SimpleNamespace
+
+        from zentao_auto_fixer.worker import Worker
+        from zentao_auto_fixer.zentao import ZenTaoPollError
+
+        run = SimpleNamespace(bug_id=1, title="bug", project_name="p", target_branch="dev", repo_url="repo")
+        state = mock.Mock()
+        state.claim_queued_batch.return_value = [run]
+        state.get_run.return_value = SimpleNamespace(status="running")
+        state.list_run_events.return_value = []
+        worker = Worker(SimpleNamespace(worker_count=1, zentao_client_script=Path("/tmp/z.py")), state)
+        worker._prepare_checkout = mock.Mock(side_effect=RuntimeError("boom"))
+        worker._fail_batch = mock.Mock()
+        project = SimpleNamespace(max_bugs_per_poll=3, process_ui_bugs=False, has_backend_repo=False)
+
+        with mock.patch("zentao_auto_fixer.worker.bug_occupancy", side_effect=ZenTaoPollError("network down")), \
+                mock.patch("zentao_auto_fixer.worker.add_comment"):
+            worker._process_batch(1, project)
+
+        # 读不到历史只跳过这一轮：单子放回队列（不能卡在 running），不落终态、也不开工
+        state.update_status.assert_called_once_with(1, "queued", error=mock.ANY)
+        state.record_run_events.assert_not_called()
+        worker._prepare_checkout.assert_not_called()
+
     def test_worker_calls_the_runner_with_a_valid_argument_list(self):
         """autospec rejects a call that no longer matches the runner's signature, which unit tests
         of the runner alone would never catch - it only blows up at run time."""
@@ -732,6 +799,7 @@ class CallSiteTests(unittest.TestCase):
             agent_bin=lambda agent: agent,
         )
         state = mock.Mock()
+        state.draining.return_value = False
         state.claim_daily_counter.return_value = True
         state.daily_counter_value.return_value = 2
         worker = Worker(settings, state)

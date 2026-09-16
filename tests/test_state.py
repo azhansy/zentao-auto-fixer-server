@@ -355,6 +355,61 @@ class FixSuccessStatsTests(unittest.TestCase):
             self.assertEqual(stats, {"fixed": 3, "verified_closed": 1})
 
 
+class DrainFlagTests(unittest.TestCase):
+    def test_drain_flag_lives_next_to_the_state_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            self.assertFalse(store.draining())
+            flag = Path(tmp) / "drain"
+            flag.write_text("", encoding="utf-8")
+            self.assertTrue(store.draining())
+
+            # 遗留的标志（脚本被强杀/机器重启）不能把服务永久卡在「不派新单」
+            stale = time.time() - store.DRAIN_MAX_AGE_SECONDS - 60
+            os.utime(flag, (stale, stale))
+            self.assertFalse(store.draining())
+
+
+class ZentaoResolvedTests(unittest.TestCase):
+    def test_only_the_non_success_rows_are_cleared(self):
+        """禅道里已解决 → 本地非成功状态作废（不再挂看板「非成功任务」）；已推送的单不碰。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            store.enqueue_first_run(_bug(1), _project())
+            store.update_status(1, "unable_to_fix", error="AI 无法自动修复", completed=True)
+            store.enqueue_first_run(_bug(2), _project())
+            store.update_status(2, "pushed", completed=True)
+            self.assertEqual(store.non_success_runs("project"), [1])
+
+            self.assertTrue(store.mark_zentao_resolved(1, "resolved", "禅道里已经是 resolved；本地的非成功状态已作废。"))
+            self.assertFalse(store.mark_zentao_resolved(2, "resolved", "不该动已推送的单"))
+
+            self.assertEqual(store.get_run(1).status, "zentao_resolved")
+            rows = {row["bug_id"]: row for row in store.list_runs()}
+            self.assertEqual(rows[1]["bug_status"], "resolved")
+            self.assertEqual(store.non_success_runs("project"), [])
+            self.assertEqual(store.get_run(2).status, "pushed")
+
+    def test_occupied_bug_is_recorded_with_or_without_an_existing_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            store.enqueue_first_run(_bug(1), _project())
+            store.update_status(1, "failed", completed=True)
+
+            self.assertTrue(store.record_skipped_occupied(_bug(1), _project(), "已被 ermao 占用：xxx"))
+            self.assertEqual(store.get_run(1).status, "skipped_occupied")
+            self.assertFalse(store.record_skipped_occupied(_bug(1), _project(), "再记一次"))
+
+            self.assertTrue(store.record_skipped_occupied(_bug(9), _project(), "已被 ermao 占用：yyy"))
+            self.assertEqual(store.get_run(9).status, "skipped_occupied")
+
+            # 已经修好推送的单不许被别人占用覆盖掉
+            store.enqueue_first_run(_bug(10), _project())
+            store.update_status(10, "pushed", completed=True)
+            self.assertFalse(store.record_skipped_occupied(_bug(10), _project(), "已被 ermao 占用：zzz"))
+            self.assertEqual(store.get_run(10).status, "pushed")
+
+
 def _bug(bug_id: int) -> BugCandidate:
     return BugCandidate(
         bug_id=bug_id,

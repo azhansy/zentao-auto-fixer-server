@@ -46,6 +46,8 @@ class Poller:
             self._thread.join(timeout=5)
 
     def poll_once(self) -> None:
+        if self.state.draining():
+            return  # 排空（准备重启）：不排新单，也不重排 awaiting_merge
         projects = [project for project in self.settings.load_projects() if project.enabled]
         # ponytail: dispatch pauses during polling; publish a collected snapshot if polling latency grows.
         with self.worker.dispatch_lock:
