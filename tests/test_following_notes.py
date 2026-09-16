@@ -25,6 +25,11 @@ class FollowingNotesTests(unittest.TestCase):
         state.record_run_event.assert_any_call(1, "following_started", "")
         state.record_run_event.assert_any_call(2, "following_started", "")
 
+    def test_start_note_does_not_impersonate_another_agents_claim_format(self):
+        """只是「别人认领了就跳过」，我们自己不贴对方的占用标记（2026-09-16 dashu 纠正）。"""
+        self.assertNotIn("【AI 处理占用】", _FOLLOWING_START_TEXT)
+        self.assertTrue(_FOLLOWING_START_TEXT.startswith("【AI 自动跟进】"))
+
     def test_start_note_not_reposted_while_previous_one_is_open(self):
         worker, state = self._worker()
         state.list_run_events.return_value = [{"event": "started"}, {"event": "following_started"}]

@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .models import RESURRECTABLE_STATUSES, RETRYABLE_STATUSES, BugCandidate, ProjectConfig, RunRecord
+from .models import (
+    RESURRECTABLE_STATUSES,
+    RETRYABLE_STATUSES,
+    ZENTAO_RESOLVED,
+    BugCandidate,
+    ProjectConfig,
+    RunRecord,
+)
 from .zentao import bug_view_url
 
 
@@ -793,6 +801,39 @@ class StateStore:
             )
             return cursor.rowcount > 0
 
+    def non_success_runs(self, project_name: str) -> List[int]:
+        """看板「非成功任务」里属于该项目、且本地状态还挂着非成功的单。
+
+        禅道里已关闭的 Bug 会从列表接口消失，轮询循环根本走不到它们，所以项目轮询还要拿这批
+        id 反过来核一次（见 poller._check_closed_vanished）。
+        """
+        marks = ",".join("?" * len(RESURRECTABLE_STATUSES))
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT bug_id FROM bug_runs WHERE project_name = ? AND status IN ({marks}) ORDER BY bug_id",
+                (project_name, *sorted(RESURRECTABLE_STATUSES)),
+            ).fetchall()
+        return [int(row["bug_id"]) for row in rows]
+
+    def mark_zentao_resolved(self, bug_id: int, zentao_status: str, message: str) -> bool:
+        """禅道里已经解决/关闭了，本地那条非成功记录已经过期 —— 收掉它，别再挂在「非成功任务」里。
+
+        只动 RESURRECTABLE_STATUSES 的行（正是看板上那批），已推送/等待交付的单不碰。
+        返回是否真的改了（改过才值得记一条事件）。
+        """
+        marks = ",".join("?" * len(RESURRECTABLE_STATUSES))
+        now = utc_now()
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE bug_runs
+                SET status = ?, bug_status = ?, error = ?, updated_at = ?, completed_at = ?
+                WHERE bug_id = ? AND status IN ({marks})
+                """,
+                (ZENTAO_RESOLVED, zentao_status, message, now, now, bug_id, *sorted(RESURRECTABLE_STATUSES)),
+            )
+            return cursor.rowcount > 0
+
     def mark_unable_to_fix(self, bug_id: int, reason: str) -> None:
         with self._lock, self._connect() as conn:
             conn.execute(
@@ -845,6 +886,55 @@ class StateStore:
                 )
             except sqlite3.IntegrityError:
                 return False
+            return True
+
+    def record_skipped_occupied(self, bug: BugCandidate, project: ProjectConfig, reason: str) -> bool:
+        """别的开发/AI 已经在禅道里认领了这个 Bug —— 记一条终态，之后永久跳过。
+
+        单子可能已经有一行（比如上一轮失败留下的），所以这里是 upsert：
+        只在状态真的变了的时候返回 True。
+        """
+        now = utc_now()
+        with self._lock, self._connect() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO bug_runs (
+                        bug_id, title, status, project_name, event_action, product_id,
+                        assigned_to, bug_type, bug_status, repo_url, target_branch,
+                        opened_by, opened_at, handled_once, error, first_seen_at, updated_at, completed_at
+                    )
+                    VALUES (?, ?, 'skipped_occupied', ?, 'poll', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+                    """,
+                    (
+                        bug.bug_id,
+                        bug.title,
+                        project.name,
+                        bug.product_id,
+                        bug.assigned_to,
+                        bug.bug_type,
+                        bug.status,
+                        project.repo_url,
+                        project.target_branch,
+                        bug.opened_by,
+                        bug.opened_at,
+                        reason,
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                cursor = conn.execute(
+                    """
+                    UPDATE bug_runs
+                    SET status = 'skipped_occupied', error = ?, updated_at = ?, completed_at = ?
+                    WHERE bug_id = ? AND status <> 'skipped_occupied'
+                      AND status NOT IN ('pushed', 'awaiting_merge', 'awaiting_release')
+                    """,
+                    (reason, now, now, bug.bug_id),
+                )
+                return cursor.rowcount > 0
             return True
 
     def mark_handled_in_zentao(self, bug_id: int) -> None:

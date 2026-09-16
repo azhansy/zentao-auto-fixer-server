@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 import tempfile
 import unittest
@@ -490,7 +491,9 @@ class CallSiteTests(unittest.TestCase):
             allow_full_xcodebuild=False,
         )
 
-        with mock.patch("zentao_auto_fixer.worker.add_comment"):
+        with mock.patch("zentao_auto_fixer.worker.add_comment"), mock.patch(
+            "zentao_auto_fixer.worker.bug_occupancy", return_value=""
+        ):
             worker._process_batch(1, project)
 
         worker._fail_batch.assert_called_once_with([run], "failed", mock.ANY, "", count_no_progress=False)
@@ -639,7 +642,9 @@ class CallSiteTests(unittest.TestCase):
             has_backend_repo=False,
         )
 
-        with mock.patch("zentao_auto_fixer.worker.add_comment"):
+        with mock.patch("zentao_auto_fixer.worker.add_comment"), mock.patch(
+            "zentao_auto_fixer.worker.bug_occupancy", return_value=""
+        ):
             worker._process_batch(1, project)
 
         worker._fail_batch.assert_called_once_with([run], "failed", "boom", "", count_no_progress=True)
@@ -670,7 +675,9 @@ class CallSiteTests(unittest.TestCase):
             has_backend_repo=False,
         )
 
-        with mock.patch("zentao_auto_fixer.worker.add_comment"):
+        with mock.patch("zentao_auto_fixer.worker.add_comment"), mock.patch(
+            "zentao_auto_fixer.worker.bug_occupancy", return_value=""
+        ):
             worker._process_batch(1, project)
 
         worker._fail_batch.assert_not_called()
@@ -826,6 +833,92 @@ class ZenTaoBugFieldTests(unittest.TestCase):
 
         with self.assertRaises(ZenTaoPollError):
             _marker_seen({"id": 1})
+
+
+class OccupancyGateTests(unittest.TestCase):
+    """别人认领的单要让出去：2026-09-16 #7998 被 ermao 的 AI 占用，我们的自动修复又修了一遍还推了代码。"""
+
+    # 实测原文（ermao 的 AI 贴的），末尾的有效期我们按 dashu 口径一律不解析。
+    CLAIM = (
+        "【AI 处理占用】此 Bug 已由 ermao 的当前 AI 开始修改，请其他 AI 不要重复修改。"
+        "开始时间：2026-09-16T12:04:11+08:00 处理分支：dev 占用标识：8f3c1d 占用有效期：240 分钟；"
+        "完成结构化备注后自动释放。"
+    )
+
+    def _occupancy(self, detail: dict, account: str = "") -> str:
+        from zentao_auto_fixer.zentao import bug_occupancy
+
+        with mock.patch("zentao_auto_fixer.zentao._bug_detail", return_value=detail), mock.patch.dict(
+            os.environ, {"ZENTAO_ACCOUNT": account}
+        ):
+            return bug_occupancy(Path("/tmp/zentao_client.py"), 7998)
+
+    def test_another_agents_claim_makes_us_let_go(self):
+        reason = self._occupancy(
+            {
+                "id": 7998,
+                "status": "active",
+                "actions": [
+                    {"actor": {"account": "ermao-ai", "realname": "二毛"}, "comment": "报告人补充了截图"},
+                    {"actor": {"account": "ermao-ai", "realname": "二毛"}, "comment": self.CLAIM},
+                ],
+            }
+        )
+        self.assertIn("占用", reason)
+        self.assertIn("ermao-ai", reason)
+
+    def test_our_own_claim_does_not_block_us(self):
+        detail = {
+            "id": 7998,
+            "status": "active",
+            "actions": [{"actor": {"account": "AI-AUTO-FIX"}, "comment": self.CLAIM}],
+        }
+        self.assertEqual(self._occupancy(detail, account="ai-auto-fix"), "")
+
+    def test_our_own_claim_stays_ours_even_without_the_account_env(self):
+        """自己贴的【AI 处理占用】不能把自己挡住：尾部的本服务标记也认。"""
+        detail = {
+            "id": 7998,
+            "status": "active",
+            "actions": [
+                {
+                    "actor": {"account": "someone-else"},
+                    "comment": self.CLAIM + "\n由 zentao-bug-fixer 自动写入",
+                }
+            ],
+        }
+        self.assertEqual(self._occupancy(detail), "")
+
+    def test_history_without_the_marker_stays_ours(self):
+        detail = {"id": 7998, "status": "active", "actions": [{"actor": {"account": "qa"}, "comment": "已修复"}]}
+        self.assertEqual(self._occupancy(detail), "")
+
+    def test_the_pre_fix_recheck_also_refuses_an_occupied_bug(self):
+        from zentao_auto_fixer.zentao import bug_is_still_actionable
+
+        detail = {"id": 7998, "status": "active", "actions": [{"actor": {"account": "ermao"}, "comment": self.CLAIM}]}
+        with mock.patch("zentao_auto_fixer.zentao._bug_detail", return_value=detail), mock.patch.dict(
+            os.environ, {"ZENTAO_ACCOUNT": ""}
+        ):
+            actionable, reason = bug_is_still_actionable(Path("/tmp/zentao_client.py"), 7998)
+        self.assertFalse(actionable)
+        self.assertIn("占用", reason)
+
+    def test_unreadable_history_blocks_instead_of_waving_the_bug_through(self):
+        from zentao_auto_fixer.zentao import ZenTaoPollError
+
+        with self.assertRaises(ZenTaoPollError):
+            self._occupancy({"id": 7998})
+
+    def test_browse_url_points_at_the_filtered_bug_list(self):
+        """dashu 给的是带保存查询的地址（bySearch-myQueryID），不是裸产品列表页。"""
+        from zentao_auto_fixer.zentao import bug_browse_url
+
+        expected = "https://zentao.example.com/zentao/bug-browse-10-all-bySearch-myQueryID-id_desc-0-20-1-bug-0.html"
+        with mock.patch.dict(os.environ, {"ZENTAO_BASE_URL": "https://zentao.example.com/zentao/"}):
+            self.assertEqual(bug_browse_url(10), expected)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(bug_browse_url(10), "")
 
 
 def _marker_seen(detail: dict) -> bool:

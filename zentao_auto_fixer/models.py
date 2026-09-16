@@ -19,8 +19,12 @@ TERMINAL_STATUSES = {
     "skipped_platform",
     "skipped_ui",
     "skipped_manual",
+    "skipped_occupied",
 }
-RETRYABLE_STATUSES = {"failed", "sync_conflict", "skipped_stale", "manual_required"}
+# 禅道里已经解决/关闭，本地那条非成功记录已过期（2026-09-16 实测：非成功任务 36 单里 35 单禅道已解决/关闭）。
+# 不进 RESURRECTABLE_STATUSES ⇒ 从看板「非成功任务」里消失；单子若被重新激活仍会重试。
+ZENTAO_RESOLVED = "zentao_resolved"
+RETRYABLE_STATUSES = {"failed", "sync_conflict", "skipped_stale", "manual_required", ZENTAO_RESOLVED}
 # Non-successful statuses the dashboard "重置" button may reset back into the queue.
 RESURRECTABLE_STATUSES = {
     "retry_exhausted",
@@ -35,6 +39,9 @@ RESURRECTABLE_STATUSES = {
 }
 # Any ZenTao comment written by this service or the skill carries this marker in its footer.
 AI_COMMENT_MARKER = "zentao-bug-fixer"
+# 别的开发/AI 在禅道里贴的「这个 Bug 我这边在改」占用标记（2026-09-16 实测 ermao 的 AI 用这个格式）。
+# 见到就永久让出去：dashu 当天指示「只要有其他 AI 占用，就不需要跟进了，时间到也不用跟进」。
+OCCUPY_MARKER = "【AI 处理占用】"
 AUTO_FIXED_STATUSES = {"pushed"}
 REACTIVATION_WORDS = (
     "activate",

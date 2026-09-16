@@ -46,6 +46,18 @@ class UiPollerTests(unittest.TestCase):
         state.enqueue_first_run.assert_called_once()
         worker.enqueue.assert_called_once_with(1)
 
+    def test_occupied_bug_is_never_enqueued(self):
+        """别的 AI 已经认领 → 连新一轮修复都不排（dashu 口径：直接跳过）。"""
+        poller, state, worker = _ui_poller(process_ui_bugs=False)
+        poller._already_handled_in_zentao = mock.Mock(return_value="occupied")
+
+        with mock.patch("zentao_auto_fixer.poller.list_project_bugs", return_value=[_bug("active")]):
+            poller.poll_once()
+
+        state.enqueue_first_run.assert_not_called()
+        worker.enqueue.assert_not_called()
+        self.assertEqual(state.record_poll_run.call_args.kwargs["skipped_resolved"], 1)
+
     def test_previously_skipped_ui_bug_is_requeued_when_enabled(self):
         poller, state, worker = _ui_poller(process_ui_bugs=True)
         state.get_run.return_value = SimpleNamespace(status="skipped_ui")
@@ -86,6 +98,33 @@ class UiPollerTests(unittest.TestCase):
         state.mark_verified_closed.assert_called_once_with(1, "closed")
         state.record_run_event.assert_called_once_with(1, "verified_closed", "closedBy=hejiajie")
 
+    def test_vanished_non_success_bug_closed_in_zentao_is_cleared(self):
+        """看板「非成功任务」里的单，禅道里早就被关掉了 —— 关闭会从列表消失，得反过来核一次。"""
+        poller, state, worker = _ui_poller(process_ui_bugs=False)
+        state.non_success_runs.return_value = [7895]
+        state.mark_zentao_resolved.return_value = True
+
+        with mock.patch(
+            "zentao_auto_fixer.poller.list_project_bugs", return_value=[]
+        ), mock.patch("zentao_auto_fixer.poller.bug_closed_by", return_value="hejiajie"):
+            poller.poll_once()
+
+        state.mark_zentao_resolved.assert_called_once_with(
+            7895, "closed", "禅道里已由 hejiajie 关闭；本地的非成功状态已作废。"
+        )
+        state.record_run_event.assert_called_once_with(7895, "zentao_resolved", mock.ANY)
+
+    def test_vanished_non_success_bug_that_is_not_closed_is_left_alone(self):
+        poller, state, worker = _ui_poller(process_ui_bugs=False)
+        state.non_success_runs.return_value = [7895]
+
+        with mock.patch(
+            "zentao_auto_fixer.poller.list_project_bugs", return_value=[]
+        ), mock.patch("zentao_auto_fixer.poller.bug_closed_by", return_value=""):
+            poller.poll_once()
+
+        state.mark_zentao_resolved.assert_not_called()
+
     def test_pushed_bug_still_listed_is_not_rechecked(self):
         poller, state, worker = _ui_poller(process_ui_bugs=False)
         state.get_run.return_value = None
@@ -121,12 +160,14 @@ class UiPollerTests(unittest.TestCase):
         with mock.patch("zentao_auto_fixer.poller.list_project_bugs", return_value=[_bug("resolved")]):
             poller.poll_once()
 
-        state.update_status.assert_called_once_with(
+        # 禅道已经解决 → 本地的失败记录作废，并且不再挂在看板「非成功任务」里。
+        state.mark_zentao_resolved.assert_called_once_with(
             1,
-            "skipped_stale",
-            error="ZenTao status is now 'resolved'; the failed task is no longer active.",
-            completed=True,
+            "resolved",
+            "禅道里已经是 resolved；本地的非成功状态已作废。",
         )
+        state.record_run_event.assert_called_once_with(1, "zentao_resolved", mock.ANY)
+        state.update_status.assert_not_called()
         worker.enqueue.assert_not_called()
 
 
@@ -225,6 +266,8 @@ def _ui_poller(*, process_ui_bugs: bool, max_bugs_per_poll: int = 3):
     state.awaiting_merge_bug_ids.return_value = []
     state.get_run.return_value = None
     state.pushed_resolved_unverified.return_value = []
+    state.non_success_runs.return_value = []
+    state.draining.return_value = False
     worker = mock.Mock()
     worker.dispatch_lock = threading.Lock()
     return Poller(settings, state, worker), state, worker

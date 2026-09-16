@@ -9,6 +9,7 @@ from typing import Any, Optional
 from .config import Settings
 from .models import (
     AUTO_FIXED_STATUSES,
+    RESURRECTABLE_STATUSES,
     RETRYABLE_STATUSES,
     TERMINAL_STATUSES,
     BugCandidate,
@@ -19,7 +20,7 @@ from .models import (
 )
 from .state import StateStore, utc_now
 from .worker import Worker
-from .zentao import ZenTaoPollError, bug_closed_by, bug_has_ai_comment, count_active_bugs, list_project_bugs
+from .zentao import ZenTaoPollError, bug_ai_state, bug_closed_by, count_active_bugs, list_project_bugs
 
 
 LOGGER = logging.getLogger("zentao_auto_fixer.poller")
@@ -65,12 +66,20 @@ class Poller:
             self._stop.wait(wait_seconds)
 
     def _already_handled_in_zentao(self, bug: BugCandidate, project: ProjectConfig) -> str:
-        """A ZenTao comment from the AI means this bug was already handled once; leave it to a human."""
+        """历史里已有 AI 备注 → 交给人工；被别人贴了占用标记 → 永久让出，都不再排进修复队列。
+
+        返回 "handled" / "occupied" / "fresh" / "unknown"（历史读不到，这一轮先不动）。
+        """
         try:
-            handled = bug_has_ai_comment(self.settings.zentao_client_script, bug.bug_id)
+            handled, occupied = bug_ai_state(self.settings.zentao_client_script, bug.bug_id)
         except ZenTaoPollError as exc:
             LOGGER.warning("Could not read bug #%s history, skipping this round: %s", bug.bug_id, exc)
             return "unknown"
+        if occupied:
+            if self.state.record_skipped_occupied(bug, project, occupied):
+                self.state.record_run_event(bug.bug_id, "skipped_occupied", occupied)
+                LOGGER.info("Bug #%s is occupied by another AI, leaving it alone: %s", bug.bug_id, occupied)
+            return "occupied"
         if not handled:
             return "fresh"
         if self.state.record_already_handled_in_zentao(bug, project):
@@ -85,8 +94,11 @@ class Poller:
         return "handled"
 
     def _check_closed_vanished(self, project: ProjectConfig, listed_ids: set) -> None:
-        """Closed bugs vanish from the list API; a pushed bug that reached resolved but is no longer
-        listed may have been verified and closed by QA — read its detail to find out."""
+        """禅道里关闭的 Bug 会从列表接口消失 —— 轮询循环根本走不到它们。
+
+        两种都要核：已推送、等 QA 复验的单（核完可能就是「验证关闭」），以及本地还挂着
+        「非成功」、但禅道里早被别人解决/关闭的单（2026-09-16 看板上 36 单里 35 单是这种）。
+        """
         for bug_id in self.state.pushed_resolved_unverified(project.name):
             if bug_id in listed_ids:
                 continue
@@ -98,6 +110,21 @@ class Poller:
             if closed_by and self.state.mark_verified_closed(bug_id, "closed"):
                 self.state.record_run_event(bug_id, "verified_closed", f"closedBy={closed_by}")
                 LOGGER.info("Bug #%s verified closed by %s", bug_id, closed_by)
+        for bug_id in self.state.non_success_runs(project.name):
+            if bug_id in listed_ids:
+                continue
+            try:
+                closed_by = bug_closed_by(self.settings.zentao_client_script, bug_id)
+            except ZenTaoPollError as exc:
+                LOGGER.warning("Could not re-read vanished bug #%s: %s", bug_id, exc)
+                continue
+            if not closed_by:
+                # 不在列表里又没关闭（比如换了产品线），不动它，免得把真失败洗成已解决
+                continue
+            message = f"禅道里已由 {closed_by} 关闭；本地的非成功状态已作废。"
+            if self.state.mark_zentao_resolved(bug_id, "closed", message):
+                self.state.record_run_event(bug_id, "zentao_resolved", message)
+                LOGGER.info("Bug #%s was closed by %s in ZenTao; local non-success status cleared", bug_id, closed_by)
 
     def _poll_project(self, project: ProjectConfig) -> None:
         started_at = utc_now()
@@ -110,8 +137,10 @@ class Poller:
         skipped_platform = 0
         skipped_ui = 0
         skipped_manual = 0
+        skipped_occupied = 0
         marked_manual = 0
         requeued_failed = 0
+        active_bugs = -1
         try:
             bugs = list_project_bugs(self.settings.zentao_client_script, project)
             total = len(bugs)
@@ -147,10 +176,21 @@ class Poller:
                                 )
                         else:
                             self.state.mark_seen_resolved_once(bug.bug_id, bug.status)
-                    elif existing and existing.status == "failed":
-                        message = f"ZenTao status is now {bug.status!r}; the failed task is no longer active."
-                        self.state.update_status(bug.bug_id, "skipped_stale", error=message, completed=True)
-                        self.state.record_run_event(bug.bug_id, "skipped_stale", message)
+                    elif existing and existing.status in RESURRECTABLE_STATUSES:
+                        # 禅道里已经解决/关闭，本地还挂着「非成功」是过期状态 —— 更新它，
+                        # 别让人在看板上以为是待处理（2026-09-16 dashu 反馈）。
+                        who = _actor_name(bug.raw.get("resolvedBy") or bug.raw.get("resolved_by"))
+                        message = f"禅道里已经是 {bug.status}（解决人：{who}）；本地的非成功状态已作废。"
+                        if not who:
+                            message = f"禅道里已经是 {bug.status}；本地的非成功状态已作废。"
+                        if self.state.mark_zentao_resolved(bug.bug_id, bug.status, message):
+                            self.state.record_run_event(bug.bug_id, "zentao_resolved", message)
+                            LOGGER.info(
+                                "Bug #%s is %r in ZenTao; cleared stale local status %r",
+                                bug.bug_id,
+                                bug.status,
+                                existing.status,
+                            )
                     continue
 
                 unresolved_count += 1
@@ -211,6 +251,9 @@ class Poller:
                 if zentao_state == "handled":
                     marked_manual += 1
                     continue
+                if zentao_state == "occupied":
+                    skipped_occupied += 1
+                    continue
                 if zentao_state == "unknown":
                     skipped_existing += 1
                     continue
@@ -224,23 +267,25 @@ class Poller:
                     queued += 1
                 else:
                     skipped_existing += 1
+            active_bugs = _active_bug_count(project)
             self.state.record_poll_run(
                 project_name=project.name,
                 product_id=project.zentao_product_id,
                 started_at=started_at,
                 status="ok",
+                active_bugs=active_bugs,
                 total_bugs=total,
                 unresolved_bugs=unresolved_count,
                 candidate_bugs=candidate_count,
                 queued_bugs=queued,
                 skipped_existing=skipped_existing,
-                skipped_resolved=skipped_resolved + skipped_platform + skipped_ui + skipped_manual,
+                skipped_resolved=skipped_resolved + skipped_platform + skipped_ui + skipped_manual + skipped_occupied,
                 marked_manual=marked_manual,
                 requeued_failed=requeued_failed,
             )
             LOGGER.info(
                 "Polled %s: total=%s unresolved=%s queued=%s existing=%s resolved=%s manual=%s "
-                "platform_skipped=%s ui_skipped=%s manual_tag_skipped=%s",
+                "platform_skipped=%s ui_skipped=%s manual_tag_skipped=%s occupied_skipped=%s",
                 project.name,
                 total,
                 unresolved_count,
@@ -251,6 +296,7 @@ class Poller:
                 skipped_platform,
                 skipped_ui,
                 skipped_manual,
+                skipped_occupied,
             )
         except Exception as exc:
             self.state.record_poll_run(
@@ -258,12 +304,13 @@ class Poller:
                 product_id=project.zentao_product_id,
                 started_at=started_at,
                 status="failed",
+                active_bugs=active_bugs,
                 total_bugs=total,
                 unresolved_bugs=unresolved_count,
                 candidate_bugs=candidate_count,
                 queued_bugs=queued,
                 skipped_existing=skipped_existing,
-                skipped_resolved=skipped_resolved + skipped_platform + skipped_ui + skipped_manual,
+                skipped_resolved=skipped_resolved + skipped_platform + skipped_ui + skipped_manual + skipped_occupied,
                 marked_manual=marked_manual,
                 requeued_failed=requeued_failed,
                 error=str(exc),
@@ -289,6 +336,13 @@ def _is_active(bug: BugCandidate) -> bool:
     if _has_value(raw.get("resolvedBy")) or _has_value(raw.get("resolved_by")):
         return False
     return True
+
+
+def _actor_name(value: Any) -> str:
+    """禅道的 resolvedBy/closedBy 可能是 {'account','realname'} 也可能是裸字符串。"""
+    if isinstance(value, dict):
+        return str(value.get("realname") or value.get("account") or "").strip()
+    return str(value or "").strip()
 
 
 def _has_value(value: Any) -> bool:

@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
 
-from .models import AI_COMMENT_MARKER, BugCandidate, ProjectConfig
+from .models import AI_COMMENT_MARKER, OCCUPY_MARKER, BugCandidate, ProjectConfig
+
+
+LOGGER = logging.getLogger("zentao_auto_fixer.zentao")
 
 
 class ZenTaoPollError(RuntimeError):
@@ -76,6 +81,12 @@ def bug_has_ai_comment(client_script: Path, bug_id: int) -> bool:
     return _has_ai_marker(_bug_detail(client_script, bug_id))
 
 
+def bug_ai_state(client_script: Path, bug_id: int) -> Tuple[bool, str]:
+    """一次读取同时判两件事：已有 AI 备注（True）、被别人占用（非空原因）。两处共用一个读，省一次外呼。"""
+    detail = _bug_detail(client_script, bug_id)
+    return _has_ai_marker(detail), _occupancy_reason(detail)
+
+
 def _bug_detail(client_script: Path, bug_id: int) -> Dict[str, Any]:
     result = subprocess.run(
         ["python3", str(client_script), "bug", str(bug_id)],
@@ -139,7 +150,47 @@ def bug_is_still_actionable(
         return False, f"ZenTao status is now {status or 'unknown'!r}, not active"
     if not ignore_ai_comment and _has_ai_marker(detail):
         return False, "ZenTao already carries an AI comment for this bug"
+    occupied = _occupancy_reason(detail)
+    if occupied:
+        return False, occupied
     return True, ""
+
+
+def bug_occupancy(client_script: Path, bug_id: int) -> str:
+    """别的 AI/开发是否已占用这个 Bug：占用了返回白话原因，没占用返回 ""。"""
+    return _occupancy_reason(_bug_detail(client_script, bug_id))
+
+
+def _occupancy_reason(detail: Dict[str, Any]) -> str:
+    """历史里出现别人贴的占用标记就永久让出去——不看到期时间，过期了也不接手。
+
+    2026-09-16 实证：ermao 的 AI 在 12:04 贴了「此 Bug 已由 ermao 的当前 AI 开始修改，请其他 AI
+    不要重复修改」，我们的自动修复 12:32 没看这条、又修了一遍并推了代码。dashu 当天定的口径是
+    「只要有其他 AI 占用，就不需要跟进了，时间到也不用跟进」，所以这里不做有效期解析。
+    """
+    actions = detail.get("actions")
+    if not isinstance(actions, list):
+        # 和 _has_ai_marker 同一口径：读不到历史就阻塞，绝不当作「没人占用」放行。
+        raise ZenTaoPollError(
+            f"Bug #{detail.get('id')} detail has no actions list; cannot tell if another AI occupied it"
+        )
+    ours = (os.getenv("ZENTAO_ACCOUNT") or "").strip().casefold()
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        comment = str(action.get("comment") or "")
+        if OCCUPY_MARKER not in comment:
+            continue
+        if AI_COMMENT_MARKER in comment:
+            continue  # 我们自己贴的认领声明（尾部带本服务标记），不算被别人占用
+        raw_actor = action.get("actor") or action.get("actorName") or ""
+        actor = _account_value(raw_actor)
+        if actor and actor.casefold() == ours:
+            continue  # 我们自己贴的占用标记，不算被别人占用
+        who = actor or _text_value(raw_actor) or "其他 AI"
+        excerpt = re.sub(r"\s+", " ", comment).strip()[:200]
+        return f"已被 {who} 占用：{excerpt}"
+    return ""
 
 
 def comment_bug(client_script: Path, bug_id: int, cause: str, solution: str) -> None:

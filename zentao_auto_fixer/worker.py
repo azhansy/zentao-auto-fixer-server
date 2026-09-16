@@ -52,6 +52,7 @@ from .zentao import (
     add_comment,
     bug_fresh_title,
     bug_is_still_actionable,
+    bug_occupancy,
     bug_view_url,
     comment_bug,
     resolve_bug,
@@ -377,6 +378,28 @@ class Worker:
                 return project
         return None
 
+    def _drop_occupied(self, batch: List[RunRecord]) -> List[RunRecord]:
+        """开工前最后一道闸：别人已经认领的单直接让出去，永不接手。
+
+        必须排在 _note_following_started 之前——那条评论写着「请勿人工介入」，贴到别人的单上就是抢单。
+        """
+        kept: List[RunRecord] = []
+        for run in batch:
+            try:
+                reason = bug_occupancy(self.settings.zentao_client_script, run.bug_id)
+            except ZenTaoPollError as exc:
+                # 读不到历史就这一轮先不做：把已认领的单放回队列（不落终态），网络抖动不该把单让出去
+                self.state.update_status(run.bug_id, "queued", error=f"Cannot re-check ZenTao occupancy: {exc}")
+                LOGGER.warning("Could not check bug #%s occupancy, left queued: %s", run.bug_id, exc)
+                continue
+            if not reason:
+                kept.append(run)
+                continue
+            self.state.update_status(run.bug_id, "skipped_occupied", error=reason, completed=True)
+            self.state.record_run_event(run.bug_id, "skipped_occupied", reason)
+            LOGGER.info("Bug #%s left to another AI: %s", run.bug_id, reason)
+        return kept
+
     def _process_batch(self, leader_bug_id: int, project: ProjectConfig) -> None:
         batch = self.state.claim_queued_batch(leader_bug_id, limit=1)
         if not batch:
@@ -411,6 +434,9 @@ class Worker:
             )
             self.state.record_run_event(run.bug_id, "skipped_manual", message)
         batch = [run for run in batch if run not in skipped_manual]
+        if not batch:
+            return
+        batch = self._drop_occupied(batch)
         if not batch:
             return
         first = batch[0]
