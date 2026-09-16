@@ -69,6 +69,7 @@ class StateStore:
                     started_at TEXT NOT NULL,
                     finished_at TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    active_bugs INTEGER NOT NULL DEFAULT -1,
                     total_bugs INTEGER NOT NULL DEFAULT 0,
                     unresolved_bugs INTEGER NOT NULL DEFAULT 0,
                     candidate_bugs INTEGER NOT NULL DEFAULT 0,
@@ -82,6 +83,8 @@ class StateStore:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_poll_runs_started ON poll_runs(started_at)")
+            # 看板统计列：老库没有 active_bugs，补一列（-1 = 本轮没统计到）
+            self._add_missing_columns(conn, "poll_runs", {"active_bugs": "INTEGER NOT NULL DEFAULT -1"})
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS run_events (
@@ -106,9 +109,7 @@ class StateStore:
             )
 
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
-        rows = conn.execute("PRAGMA table_info(bug_runs)").fetchall()
-        existing = {row["name"] for row in rows}
-        additions = {
+        self._add_missing_columns(conn, "bug_runs", {
             "project_name": "TEXT NOT NULL DEFAULT ''",
             "bug_type": "TEXT NOT NULL DEFAULT ''",
             "bug_status": "TEXT NOT NULL DEFAULT ''",
@@ -121,10 +122,13 @@ class StateStore:
             "writeback_payload": "TEXT NOT NULL DEFAULT ''",
             "verified_closed": "INTEGER NOT NULL DEFAULT 0",
             "reactivated_after_auto_fix": "INTEGER NOT NULL DEFAULT 0",
-        }
+        })
+
+    def _add_missing_columns(self, conn: sqlite3.Connection, table: str, additions: Dict[str, str]) -> None:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         for name, definition in additions.items():
             if name not in existing:
-                conn.execute(f"ALTER TABLE bug_runs ADD COLUMN {name} {definition}")
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
     def enqueue_first_run(self, bug: BugCandidate, project: ProjectConfig) -> bool:
         now = utc_now()
@@ -550,6 +554,7 @@ class StateStore:
         product_id: int,
         started_at: str,
         status: str,
+        active_bugs: int = -1,
         total_bugs: int = 0,
         unresolved_bugs: int = 0,
         candidate_bugs: int = 0,
@@ -565,11 +570,11 @@ class StateStore:
                 """
                 INSERT INTO poll_runs (
                     project_name, product_id, started_at, finished_at, status,
-                    total_bugs, unresolved_bugs, candidate_bugs, queued_bugs,
+                    active_bugs, total_bugs, unresolved_bugs, candidate_bugs, queued_bugs,
                     skipped_existing, skipped_resolved, marked_manual,
                     requeued_failed, error
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_name,
@@ -577,6 +582,7 @@ class StateStore:
                     started_at,
                     utc_now(),
                     status,
+                    active_bugs,
                     total_bugs,
                     unresolved_bugs,
                     candidate_bugs,

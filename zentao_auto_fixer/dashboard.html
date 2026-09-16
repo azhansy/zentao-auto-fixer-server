@@ -33,6 +33,9 @@
     .stat { position: relative; }
     .help-tip { position: absolute; top: 100%; left: 0; margin-top: 6px; padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; line-height: 1.5; max-width: 240px; z-index: 10; }
     .stat strong { display: block; margin-top: 5px; font-size: 25px; }
+    .active-counts { margin-bottom: 16px; }
+    .active-counts .table-wrap { max-height: 260px; }
+    .active-counts td.count { font-size: 18px; font-weight: 700; }
     .layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 440px); gap: 16px; align-items: start; }
     .panel { overflow: hidden; }
     .panel-head { min-height: 58px; padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -100,6 +103,20 @@
     <div class="stat"><span class="muted">排队</span><strong id="count-queued">0</strong></div>
     <div class="stat"><span class="muted">其他终态</span><strong id="count-other">0</strong></div>
     <div class="stat"><span class="muted" id="rate-label">修复成功率</span><span class="help" id="rate-help" role="button" tabindex="0" title="分子：AI 修复后被 QA 验证关闭、期间无人打回的 bug 数；分母：AI 成功修复（已推送）的总数。">?</span><strong id="count-rate">—</strong><div class="help-tip" id="rate-tip" hidden>分子：AI 修复后被 QA 验证关闭、期间无人打回的 bug 数；分母：AI 成功修复（已推送）的总数。</div></div>
+  </section>
+
+  <section class="panel active-counts">
+    <div class="panel-head">
+      <h2>各项目激活 Bug 数</h2>
+      <span class="muted">禅道 status=激活 的全部 Bug（含设计缺陷等非代码类），每轮轮询刷新一次</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>项目</th><th>激活 Bug</th><th>统计时间</th></tr></thead>
+        <tbody id="active-counts"></tbody>
+      </table>
+      <div id="active-empty" class="empty" hidden>还没有轮询数据</div>
+    </div>
   </section>
 
   <div class="layout">
@@ -173,7 +190,8 @@
     writeback_queued: "等待回写", writeback_failed: "回写失败", writeback_exhausted: "回写耗尽",
     unable_to_fix: "无法定位", handled_in_zentao: "禅道已处理", manual_required: "待人工",
     skipped_stale: "已过期", skipped_ui: "跳过 UI", skipped_platform: "跳过平台",
-    rejected_to_reporter: "旧版退回", no_changes: "无代码改动"
+    rejected_to_reporter: "旧版退回", no_changes: "无代码改动",
+    zentao_resolved: "禅道已解决", skipped_occupied: "其他 AI 占用"
   };
   const failureStatuses = new Set(["merge_request_failed", "failed", "sync_conflict", "retry_exhausted", "writeback_failed", "writeback_exhausted"]);
   const resettableStatuses = new Set(["retry_exhausted", "writeback_exhausted", "unable_to_fix", "failed", "sync_conflict", "manual_required", "skipped_stale", "merge_request_failed", "no_changes"]);
@@ -200,6 +218,22 @@
   const statusTime = run => queuedStatuses.has(run.status) || run.status === "running"
     ? run.updated_at : run.completed_at || run.updated_at;
   const sortPriority = run => run.status === "running" ? 0 : queuedStatuses.has(run.status) ? 1 : 2;
+  // 禅道 bug 页一律新开标签，看板保持原样。
+  function bugLink(run) {
+    const link = textNode("a", `#${run.bug_id}`);
+    link.href = run.url || "#";
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.addEventListener("click", async event => {
+      event.stopPropagation();
+      if (run.url) return;
+      event.preventDefault();
+      const response = await fetch(`/runs/${run.bug_id}`);
+      const detail = response.ok ? (await response.json()).run : null;
+      if (detail?.url) window.open(detail.url, "_blank", "noopener");
+    });
+    return link;
+  }
 
   function renderSummary() {
     const counts = { all: runs.length, success: 0, failure: 0, running: 0, queued: 0, other: 0 };
@@ -231,17 +265,7 @@
       row.dataset.bugId = run.bug_id;
       if (run.bug_id === selectedBug) row.className = "selected";
       const bugCell = document.createElement("td");
-      const bugLink = textNode("a", `#${run.bug_id}`);
-      bugLink.href = run.url || "#";
-      bugLink.addEventListener("click", async event => {
-        event.stopPropagation();
-        if (run.url) return;
-        event.preventDefault();
-        const response = await fetch(`/runs/${run.bug_id}`);
-        const detail = response.ok ? (await response.json()).run : null;
-        if (detail?.url) window.location.assign(detail.url);
-      });
-      bugCell.append(bugLink);
+      bugCell.append(bugLink(run));
       row.append(bugCell);
       row.append(textNode("td", run.title || "-", "title"));
       row.append(textNode("td", run.project_name || "-"));
@@ -307,17 +331,7 @@
       const row = document.createElement("tr");
       row.dataset.bugId = run.bug_id;
       const bugCell = document.createElement("td");
-      const bugLink = textNode("a", `#${run.bug_id}`);
-      bugLink.href = run.url || "#";
-      bugLink.addEventListener("click", async event => {
-        event.stopPropagation();
-        if (run.url) return;
-        event.preventDefault();
-        const response = await fetch(`/runs/${run.bug_id}`);
-        const detail = response.ok ? (await response.json()).run : null;
-        if (detail?.url) window.location.assign(detail.url);
-      });
-      bugCell.append(bugLink);
+      bugCell.append(bugLink(run));
       const statusCell = document.createElement("td");
       statusCell.append(textNode("span", statusLabels[run.status] || run.status, `badge ${category(run.status)}`));
       const errorCell = textNode("td", run.error || "-", "err");
@@ -359,6 +373,34 @@
     byId("resettable-empty").hidden = resettable.length !== 0;
   }
 
+  function renderActiveCounts(polls) {
+    const body = byId("active-counts");
+    body.replaceChildren();
+    // /polls 按 started_at 倒序返回，所以每个项目第一次出现的就是最近一轮。
+    const latest = new Map();
+    polls.forEach(poll => {
+      if (!latest.has(poll.project_name)) latest.set(poll.project_name, poll);
+    });
+    const rows = [...latest.values()].sort((left, right) => (right.active_bugs ?? -1) - (left.active_bugs ?? -1));
+    rows.forEach(poll => {
+      const count = typeof poll.active_bugs === "number" ? poll.active_bugs : -1;
+      const row = document.createElement("tr");
+      const countCell = textNode("td", count >= 0 ? String(count) : "—", count >= 0 ? "count" : "count muted");
+      if (poll.url && count >= 0) {
+        // 禅道 21.5 没有可分享的「状态=激活」筛选网址，这里给的是该产品的 Bug 列表页。
+        const link = textNode("a", String(count));
+        link.href = poll.url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.title = "在新标签页打开禅道 Bug 列表";
+        countCell.replaceChildren(link);
+      }
+      row.append(textNode("td", poll.project_name || "-"), countCell, textNode("td", localTime(poll.started_at)));
+      body.append(row);
+    });
+    byId("active-empty").hidden = rows.length !== 0;
+  }
+
   function renderPolls(polls) {
     const body = byId("polls");
     body.replaceChildren();
@@ -385,6 +427,7 @@
       fixSuccess = runsData.fix_success || { fixed: 0, verified_closed: 0 };
       const polls = (await pollsResponse.json()).polls || [];
       renderSummary();
+      renderActiveCounts(polls);
       renderRuns();
       renderResettable();
       renderPolls(polls);

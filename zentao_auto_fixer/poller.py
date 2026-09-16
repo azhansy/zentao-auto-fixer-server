@@ -19,7 +19,7 @@ from .models import (
 )
 from .state import StateStore, utc_now
 from .worker import Worker
-from .zentao import ZenTaoPollError, bug_closed_by, bug_has_ai_comment, list_project_bugs
+from .zentao import ZenTaoPollError, bug_closed_by, bug_has_ai_comment, count_active_bugs, list_project_bugs
 
 
 LOGGER = logging.getLogger("zentao_auto_fixer.poller")
@@ -269,6 +269,15 @@ class Poller:
                 error=str(exc),
             )
             raise
+
+
+def _active_bug_count(project: ProjectConfig) -> int:
+    """看板统计用的「激活」总数。取不到就记 -1（看板显示 —），统计失败绝不拖垮本轮修复。"""
+    try:
+        return count_active_bugs(project)
+    except Exception as exc:  # ponytail: 统计是旁路指标，网络/凭证异常都只降级，不中断轮询
+        LOGGER.warning("统计 %s 的激活 Bug 数失败：%s", project.name, exc)
+        return -1
 
 
 def _is_active(bug: BugCandidate) -> bool:

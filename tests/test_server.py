@@ -56,7 +56,13 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
         self.assertIn("禅道自动修复看板".encode(), body)
         self.assertIn(b"/runs?limit=500", body)
-        self.assertIn(b"window.location.assign(detail.url)", body)
+        self.assertIn(b'link.target = "_blank"', body)
+        self.assertIn(b'window.open(detail.url, "_blank", "noopener")', body)
+        self.assertIn("各项目激活 Bug 数".encode(), body)
+        self.assertIn(b'byId("active-counts")', body)
+        self.assertIn("link.title = \"在新标签页打开禅道 Bug 列表\"".encode(), body)
+        self.assertIn("zentao_resolved: \"禅道已解决\"".encode(), body)
+        self.assertIn("skipped_occupied: \"其他 AI 占用\"".encode(), body)
         self.assertIn(b"const pageSize = 50", body)
         self.assertIn(b"sortPriority(left) - sortPriority(right)", body)
 
@@ -86,6 +92,31 @@ class DashboardTests(unittest.TestCase):
             },
         )
         self.assertEqual(seen, [500])
+
+    def test_polls_carry_the_zentao_bug_list_url(self):
+        """看板「各项目激活 Bug 数」点进去要跳到该产品的禅道 Bug 列表页。"""
+        app = SimpleNamespace(
+            state=SimpleNamespace(list_poll_runs=lambda limit: [{"project_name": "Circllo", "product_id": 11}])
+        )
+
+        with patch.dict("os.environ", {"ZENTAO_BASE_URL": "https://zentao.example.test/zentao"}):
+            status, _headers, body = get(app, "/polls?limit=100")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body),
+            {"polls": [{"project_name": "Circllo", "product_id": 11,
+                        "url": "https://zentao.example.test/zentao/"
+                               "bug-browse-11-all-bySearch-myQueryID-id_desc-0-20-1-bug-0.html"}]},
+        )
+
+    def test_polls_without_a_product_id_stay_unlinked(self):
+        app = SimpleNamespace(state=SimpleNamespace(list_poll_runs=lambda limit: [{"project_name": "broken"}]))
+
+        status, _headers, body = get(app, "/polls?limit=100")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"polls": [{"project_name": "broken", "url": ""}]})
 
 
 class ResurrectEndpointTests(unittest.TestCase):

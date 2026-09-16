@@ -29,6 +29,20 @@ def bug_view_url(bug_id: int) -> str:
     return f"{base_url}/bug-view-{bug_id}.html"
 
 
+def bug_browse_url(product_id: int) -> str:
+    """该产品「筛选后的」Bug 列表页（看板「激活 Bug 数」点进去看的就是这批单）。
+
+    地址格式是 dashu 给的（2026-09-16）：`bySearch-myQueryID` 表示用他存在禅道账号里的那个
+    保存查询（他会把条件维护成「激活」）。我先前只找到不带筛选的产品列表页 —— 状态筛选确实是
+    浏览器端的表格状态、页面里没有 status= 链接，但保存查询这条路径是可分享的，用它。
+    中间几段（id_desc / 0 / 20 / 1 / bug / 0）是禅道列表页固定的排序与分页参数，照原样保留。
+    """
+    base_url = os.getenv("ZENTAO_BASE_URL", "").rstrip("/")
+    if not base_url:
+        return ""
+    return f"{base_url}/bug-browse-{product_id}-all-bySearch-myQueryID-id_desc-0-20-1-bug-0.html"
+
+
 def list_project_bugs(client_script: Path, project: ProjectConfig) -> List[BugCandidate]:
     try:
         return _list_project_bugs_with_helper(client_script, project)
@@ -334,7 +348,8 @@ def _list_project_bugs_with_helper(client_script: Path, project: ProjectConfig) 
     return _filter_and_sort_candidates(candidates, project)
 
 
-def _list_project_bugs_with_curl(project: ProjectConfig) -> List[BugCandidate]:
+def _fetch_product_bugs(project: ProjectConfig) -> Tuple[List[Dict[str, Any]], int]:
+    """REST 直读该产品的一页 Bug（不做任何类型过滤），返回 (bug 列表, 接口报告的条数)。"""
     token = os.getenv("ZENTAO_TOKEN") or _curl_login()
     base_url = _required_env("ZENTAO_BASE_URL").rstrip("/")
     api_prefix = os.getenv("ZENTAO_API_PREFIX", "/api.php/v1").strip("/")
@@ -349,10 +364,48 @@ def _list_project_bugs_with_curl(project: ProjectConfig) -> List[BugCandidate]:
         bugs = data
     else:
         raise ZenTaoPollError("Could not find bugs list in curl response")
+    total = _int_value(data.get("total"), 0) if isinstance(data, dict) else len(bugs)
+    return [bug for bug in bugs if isinstance(bug, dict)], total
+
+
+def _list_project_bugs_with_curl(project: ProjectConfig) -> List[BugCandidate]:
+    bugs, _total = _fetch_product_bugs(project)
     if project.only_code_bugs:
-        bugs = [bug for bug in bugs if isinstance(bug, dict) and _is_code_bug(bug)]
-    candidates = [_candidate_from_bug(project.zentao_product_id, bug) for bug in bugs if isinstance(bug, dict)]
+        bugs = [bug for bug in bugs if _is_code_bug(bug)]
+    candidates = [_candidate_from_bug(project.zentao_product_id, bug) for bug in bugs]
     return _filter_and_sort_candidates(candidates, project)
+
+
+def count_active_bugs(project: ProjectConfig) -> int:
+    """该产品当前「激活」状态的 Bug 总数（含设计缺陷等非代码类），供看板统计展示。
+
+    口径要和禅道列表一致，所以不能走 `zentao_client bugs --all`：那条路会按 only_code_bugs
+    丢掉非代码类 Bug，数出来的「激活」会偏小（实测 Circllo 11 个只数到 4 个）。
+    接口不支持按 status 过滤，只能整页取回后本地计数。
+    """
+    bugs, total = _fetch_product_bugs(project)
+    if total > len(bugs):
+        LOGGER.warning(
+            "统计 %s 的激活 Bug 时只取回 %s/%s 条（AUTO_FIXER_ZENTAO_PAGE_LIMIT 限制），数字可能偏小",
+            project.name,
+            len(bugs),
+            total,
+        )
+    return sum(1 for bug in bugs if bug_is_active(bug))
+
+
+def bug_is_active(bug: Dict[str, Any]) -> bool:
+    """禅道里的「激活」：status=active 且没有 resolvedBy/closedBy。
+
+    与 poller._is_active 同一口径。那条是修复队列的入口闸，改动风险高，所以两处并存，
+    由 tests/test_poller.py 的比对用例盯着两者不跑偏。
+    """
+    if _text_value(bug.get("status")).strip().lower() != "active":
+        return False
+    return not any(
+        _has_value(bug.get(field))
+        for field in ("closedBy", "closed_by", "resolvedBy", "resolved_by")
+    )
 
 
 def _filter_and_sort_candidates(
@@ -442,6 +495,14 @@ def _candidate_from_bug(product_id: int, bug: Dict[str, Any]) -> BugCandidate:
             or bug.get("opened_at")
         ),
     )
+
+
+def _has_value(value: Any) -> bool:
+    if value in (None, "", 0, "0"):
+        return False
+    if isinstance(value, dict):
+        return any(_has_value(item) for item in value.values())
+    return True
 
 
 def _account_value(value: Any) -> str:

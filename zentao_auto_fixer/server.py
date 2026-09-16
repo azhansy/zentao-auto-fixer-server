@@ -16,7 +16,7 @@ from .models import RESURRECTABLE_STATUSES
 from .poller import Poller
 from .state import StateStore, utc_now
 from .worker import Worker
-from .zentao import ZenTaoPollError, bug_is_still_actionable, bug_view_url
+from .zentao import ZenTaoPollError, bug_browse_url, bug_is_still_actionable, bug_view_url
 
 
 LOGGER = logging.getLogger("zentao_auto_fixer")
@@ -93,7 +93,7 @@ def make_handler(app: App):
             if path == "/polls":
                 self._json(
                     HTTPStatus.OK,
-                    {"polls": app.state.list_poll_runs(_limit_from_query(query))},
+                    {"polls": [_with_browse_url(poll) for poll in app.state.list_poll_runs(_limit_from_query(query))]},
                 )
                 return
             if path.startswith("/polls/"):
@@ -243,6 +243,15 @@ def _path_and_query(raw_path: str) -> Tuple[str, Dict[str, str]]:
     parsed = urlparse(raw_path)
     query = {key: values[-1] for key, values in parse_qs(parsed.query).items() if values}
     return parsed.path, query
+
+
+def _with_browse_url(poll: Dict[str, Any]) -> Dict[str, Any]:
+    """看板「各项目激活 Bug 数」点进禅道列表页用；产品号缺失/未配 base_url 时 url 为空串。"""
+    try:
+        product_id = int(poll.get("product_id"))
+    except (TypeError, ValueError):
+        return {**poll, "url": ""}
+    return {**poll, "url": bug_browse_url(product_id)}
 
 
 def _limit_from_query(query: Dict[str, str]) -> int:

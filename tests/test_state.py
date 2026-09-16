@@ -1,4 +1,7 @@
+import os
+import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -227,6 +230,7 @@ class StateTests(unittest.TestCase):
                 product_id=8,
                 started_at="2026-06-01T00:00:00+00:00",
                 status="ok",
+                active_bugs=11,
                 total_bugs=3,
                 unresolved_bugs=0,
                 candidate_bugs=0,
@@ -237,6 +241,44 @@ class StateTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["project_name"], "project")
             self.assertEqual(rows[0]["queued_bugs"], 0)
+            self.assertEqual(rows[0]["active_bugs"], 11)
+
+    def test_old_poll_runs_table_gains_the_active_bugs_column(self):
+        """上线前建的库没有 active_bugs，启动时应自动补列，而不是等报错。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.sqlite3"
+            with sqlite3.connect(path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE poll_runs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        project_name TEXT NOT NULL,
+                        product_id INTEGER NOT NULL,
+                        started_at TEXT NOT NULL,
+                        finished_at TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        total_bugs INTEGER NOT NULL DEFAULT 0,
+                        unresolved_bugs INTEGER NOT NULL DEFAULT 0,
+                        candidate_bugs INTEGER NOT NULL DEFAULT 0,
+                        queued_bugs INTEGER NOT NULL DEFAULT 0,
+                        skipped_existing INTEGER NOT NULL DEFAULT 0,
+                        skipped_resolved INTEGER NOT NULL DEFAULT 0,
+                        marked_manual INTEGER NOT NULL DEFAULT 0,
+                        requeued_failed INTEGER NOT NULL DEFAULT 0,
+                        error TEXT NOT NULL DEFAULT ''
+                    )
+                    """
+                )
+            store = StateStore(path)
+            store.record_poll_run(
+                project_name="project",
+                product_id=8,
+                started_at="2026-06-01T00:00:00+00:00",
+                status="ok",
+                active_bugs=6,
+            )
+
+            self.assertEqual(store.list_poll_runs()[0]["active_bugs"], 6)
 
     def test_record_run_event(self):
         with tempfile.TemporaryDirectory() as tmp:
