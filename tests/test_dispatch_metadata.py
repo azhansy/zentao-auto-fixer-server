@@ -108,10 +108,10 @@ class DispatchAndMetadataTests(unittest.TestCase):
 
     def test_model_comes_from_runtime_result_and_survives_writeback_retry(self):
         output = 'diagnostic line\n' + json.dumps({
-            'type': 'result', 'modelUsage': {'deepseek-v4-pro[1m]': {}}
+            'type': 'result', 'modelUsage': {'deepseek-flash': {}}
         })
         info = _runtime_ai_info('claude', output)
-        self.assertIn('DeepSeek（deepseek-v4-pro[1m]）', info)
+        self.assertIn('DeepSeek（deepseek-flash）', info)
         self.assertIn('Claude Code', info)
         payload = {'cause': 'cause', 'solution': _solution_text({'ai_info': info}, 'app:abc'),
                    'commit_summary': 'app:abc'}
