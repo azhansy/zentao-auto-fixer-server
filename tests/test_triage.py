@@ -877,6 +877,28 @@ class ZenTaoBugFieldTests(unittest.TestCase):
                 (False, "ZenTao bug has been deleted"),
             )
 
+    def test_vanished_bug_reason_covers_delete_close_and_resolve(self):
+        """列表接口看不见已删除的单、关闭的单也会消失 —— 只能反过来按终态标记判。"""
+        from zentao_auto_fixer.zentao import bug_vanished_reason
+
+        cases = [
+            ({"id": 1, "status": "active", "deleted": True}, ("deleted", "禅道里已删除")),
+            (
+                {"id": 1, "status": "closed", "closedBy": {"account": "shuke", "realname": "舒克"}},
+                ("closed", "禅道里已被 shuke 关闭"),
+            ),
+            (
+                {"id": 1, "status": "resolved", "resolvedBy": {"account": "Leo"}},
+                ("resolved", "禅道里已被 Leo 解决"),
+            ),
+            # 不在列表里但禅道里还活着（比如换了产品线）—— 不是终态，别把真该修的单洗成已完成。
+            ({"id": 1, "status": "active"}, ("", "")),
+            ({"id": 1, "status": "active", "closedBy": {"account": ""}}, ("", "")),
+        ]
+        for detail, expected in cases:
+            with mock.patch("zentao_auto_fixer.zentao._bug_detail", return_value=detail):
+                self.assertEqual(bug_vanished_reason(Path("/tmp/zentao.py"), 1), expected, detail)
+
     def test_owner_approved_manual_retry_can_ignore_an_old_ai_marker(self):
         from zentao_auto_fixer.zentao import bug_is_still_actionable
 

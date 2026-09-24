@@ -129,6 +129,28 @@ def bug_closed_by(client_script: Path, bug_id: int) -> str:
     return _account_value(value)
 
 
+def bug_vanished_reason(client_script: Path, bug_id: int) -> Tuple[str, str]:
+    """这单在禅道里是不是已经是「不用再处理」的终态：是则返回 (禅道状态, 白话原因)，否则 ("", "")。
+
+    列表接口不返回已删除的单，已关闭的单也会从列表里消失 —— 本地还挂着「排队」或
+    「非成功」的单，只有反过来逐个核一次才看得见（见 poller._check_closed_vanished）。
+    2026-09-24 实测：看板上 5 条单卡在「排队」，禅道里 2 条已删除、3 条已关闭。
+
+    只认明确的终态标记（删除／关闭／解决），不看 status 本身：换了产品线之类的
+    「不在列表里但仍是 active」不该被当成已处理，否则会把真需要修的洗成已完成。
+    """
+    detail = _bug_detail(client_script, bug_id)
+    if detail.get("deleted"):
+        return "deleted", "禅道里已删除"
+    closed_by = _account_value(detail.get("closedBy") or detail.get("closed_by"))
+    if closed_by:
+        return "closed", f"禅道里已被 {closed_by} 关闭"
+    resolved_by = _account_value(detail.get("resolvedBy") or detail.get("resolved_by"))
+    if resolved_by:
+        return "resolved", f"禅道里已被 {resolved_by} 解决"
+    return "", ""
+
+
 def bug_fresh_title(client_script: Path, bug_id: int) -> str:
     """The queued title can be hours old; humans may have edited it (e.g. added a 【ui】 tag)."""
     detail = _bug_detail(client_script, bug_id)
@@ -452,6 +474,8 @@ def bug_is_active(bug: Dict[str, Any]) -> bool:
     由 tests/test_poller.py 的比对用例盯着两者不跑偏。
     """
     if _text_value(bug.get("status")).strip().lower() != "active":
+        return False
+    if _has_value(bug.get("deleted")):
         return False
     return not any(
         _has_value(bug.get(field))

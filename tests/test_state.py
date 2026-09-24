@@ -390,6 +390,24 @@ class ZentaoResolvedTests(unittest.TestCase):
             self.assertEqual(store.non_success_runs("project"), [])
             self.assertEqual(store.get_run(2).status, "pushed")
 
+    def test_a_queued_row_is_cleared_too(self):
+        """还在排队的单，禅道里被删除/关闭后没人收得掉，会永远卡在看板「排队」（2026-09-24 实测 5 条）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            store.enqueue_first_run(_bug(1), _project())
+            store.enqueue_first_run(_bug(2), _project())
+            store.update_status(2, "writeback_queued", completed=False)
+            self.assertEqual(store.queued_runs("project"), [1, 2])
+
+            self.assertTrue(store.mark_zentao_resolved(1, "deleted", "禅道里已删除；本地这条记录已作废。"))
+            self.assertTrue(store.mark_zentao_resolved(2, "closed", "禅道里已被 shuke 关闭；本地这条记录已作废。"))
+
+            self.assertEqual(store.get_run(1).status, "zentao_resolved")
+            self.assertEqual(store.get_run(2).status, "zentao_resolved")
+            self.assertEqual(store.queued_runs("project"), [])
+            # 别的项目里的排队单不该被顺手带出来
+            self.assertEqual(store.queued_runs("another-project"), [])
+
     def test_occupied_bug_is_recorded_with_or_without_an_existing_row(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = StateStore(Path(tmp) / "state.sqlite3")

@@ -20,7 +20,14 @@ from .models import (
 )
 from .state import StateStore, utc_now
 from .worker import Worker
-from .zentao import ZenTaoPollError, bug_ai_state, bug_closed_by, count_active_bugs, list_project_bugs
+from .zentao import (
+    ZenTaoPollError,
+    bug_ai_state,
+    bug_closed_by,
+    bug_vanished_reason,
+    count_active_bugs,
+    list_project_bugs,
+)
 
 
 LOGGER = logging.getLogger("zentao_auto_fixer.poller")
@@ -98,8 +105,10 @@ class Poller:
     def _check_closed_vanished(self, project: ProjectConfig, listed_ids: set) -> None:
         """禅道里关闭的 Bug 会从列表接口消失 —— 轮询循环根本走不到它们。
 
-        两种都要核：已推送、等 QA 复验的单（核完可能就是「验证关闭」），以及本地还挂着
-        「非成功」、但禅道里早被别人解决/关闭的单（2026-09-16 看板上 36 单里 35 单是这种）。
+        三种都要核：已推送、等 QA 复验的单（核完可能就是「验证关闭」），本地还挂着
+        「非成功」、但禅道里早被别人解决/关闭的单（2026-09-16 看板上 36 单里 35 单是这种），
+        以及本地还挂在「排队」的单 —— 已删除的单同样不在列表里，只有反过来核才看得见
+        （2026-09-24 看板上 5 条卡在「排队」，禅道里 2 条已删除、3 条已关闭）。
         """
         for bug_id in self.state.pushed_resolved_unverified(project.name):
             if bug_id in listed_ids:
@@ -112,21 +121,21 @@ class Poller:
             if closed_by and self.state.mark_verified_closed(bug_id, "closed"):
                 self.state.record_run_event(bug_id, "verified_closed", f"closedBy={closed_by}")
                 LOGGER.info("Bug #%s verified closed by %s", bug_id, closed_by)
-        for bug_id in self.state.non_success_runs(project.name):
+        for bug_id in self.state.non_success_runs(project.name) + self.state.queued_runs(project.name):
             if bug_id in listed_ids:
                 continue
             try:
-                closed_by = bug_closed_by(self.settings.zentao_client_script, bug_id)
+                zentao_status, reason = bug_vanished_reason(self.settings.zentao_client_script, bug_id)
             except ZenTaoPollError as exc:
                 LOGGER.warning("Could not re-read vanished bug #%s: %s", bug_id, exc)
                 continue
-            if not closed_by:
-                # 不在列表里又没关闭（比如换了产品线），不动它，免得把真失败洗成已解决
+            if not reason:
+                # 不在列表里又不是终态（比如换了产品线），不动它，免得把真失败洗成已解决
                 continue
-            message = f"禅道里已由 {closed_by} 关闭；本地的非成功状态已作废。"
-            if self.state.mark_zentao_resolved(bug_id, "closed", message):
+            message = f"{reason}；本地这条记录已作废。"
+            if self.state.mark_zentao_resolved(bug_id, zentao_status, message):
                 self.state.record_run_event(bug_id, "zentao_resolved", message)
-                LOGGER.info("Bug #%s was closed by %s in ZenTao; local non-success status cleared", bug_id, closed_by)
+                LOGGER.info("Bug #%s no longer needs work (%s); local record cleared", bug_id, reason)
 
     def _poll_project(self, project: ProjectConfig) -> None:
         started_at = utc_now()
@@ -333,6 +342,10 @@ def _is_active(bug: BugCandidate) -> bool:
     if bug.status.strip().lower() != "active":
         return False
     raw = bug.raw
+    if _has_value(raw.get("deleted")):
+        # 已删除的单 status 仍是 active（2026-09-24 实测 #8091/#8220），列表接口现在不返回它们，
+        # 但入口闸不能指望上游一直如此：一条已删除的单不该换成 AI 时间去跑。
+        return False
     if _has_value(raw.get("closedBy")) or _has_value(raw.get("closed_by")):
         return False
     if _has_value(raw.get("resolvedBy")) or _has_value(raw.get("resolved_by")):

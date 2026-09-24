@@ -28,6 +28,10 @@ class ActiveCountTests(unittest.TestCase):
             {"status": "resolved"},
             {"status": "closed"},
             {"status": "active", "closedBy": 0},
+            {"status": "active", "deleted": True},
+            {"status": "active", "deleted": "1"},
+            {"status": "active", "deleted": False},
+            {"status": "active", "deleted": "0"},
         ]
         for raw in samples:
             bug = _bug(str(raw.get("status") or ""), **{k: v for k, v in raw.items() if k != "status"})
@@ -78,6 +82,13 @@ class ActiveFilterTests(unittest.TestCase):
         self.assertFalse(_is_active(_bug("active", resolvedBy="dev")))
         self.assertFalse(_is_active(_bug("active", closedBy="qa")))
         self.assertTrue(_is_active(_bug("active", resolvedBy="", closedBy=None)))
+
+    def test_active_but_deleted_is_skipped(self):
+        """已删除的单 status 仍是 active（2026-09-24 实测 #8091/#8220），入口闸要挡住它。"""
+        self.assertFalse(_is_active(_bug("active", deleted=True)))
+        self.assertFalse(_is_active(_bug("active", deleted="1")))
+        self.assertTrue(_is_active(_bug("active", deleted=False)))
+        self.assertTrue(_is_active(_bug("active", deleted="0")))
 
 
 class UiPollerTests(unittest.TestCase):
@@ -162,11 +173,14 @@ class UiPollerTests(unittest.TestCase):
 
         with mock.patch(
             "zentao_auto_fixer.poller.list_project_bugs", return_value=[]
-        ), mock.patch("zentao_auto_fixer.poller.bug_closed_by", return_value="hejiajie"):
+        ), mock.patch(
+            "zentao_auto_fixer.poller.bug_vanished_reason",
+            return_value=("closed", "禅道里已被 hejiajie 关闭"),
+        ):
             poller.poll_once()
 
         state.mark_zentao_resolved.assert_called_once_with(
-            7895, "closed", "禅道里已由 hejiajie 关闭；本地的非成功状态已作废。"
+            7895, "closed", "禅道里已被 hejiajie 关闭；本地这条记录已作废。"
         )
         state.record_run_event.assert_called_once_with(7895, "zentao_resolved", mock.ANY)
 
@@ -176,7 +190,42 @@ class UiPollerTests(unittest.TestCase):
 
         with mock.patch(
             "zentao_auto_fixer.poller.list_project_bugs", return_value=[]
-        ), mock.patch("zentao_auto_fixer.poller.bug_closed_by", return_value=""):
+        ), mock.patch(
+            "zentao_auto_fixer.poller.bug_vanished_reason", return_value=("", "")
+        ):
+            poller.poll_once()
+
+        state.mark_zentao_resolved.assert_not_called()
+
+    def test_queued_bug_deleted_in_zentao_leaves_the_queue(self):
+        """看板「排队」里的单，禅道里被删掉了 —— 删除同样让它从列表消失，状态会永远卡在排队。"""
+        poller, state, worker = _ui_poller(process_ui_bugs=False)
+        state.queued_runs.return_value = [8091]
+        state.mark_zentao_resolved.return_value = True
+
+        with mock.patch(
+            "zentao_auto_fixer.poller.list_project_bugs", return_value=[]
+        ), mock.patch(
+            "zentao_auto_fixer.poller.bug_vanished_reason",
+            return_value=("deleted", "禅道里已删除"),
+        ):
+            poller.poll_once()
+
+        state.mark_zentao_resolved.assert_called_once_with(
+            8091, "deleted", "禅道里已删除；本地这条记录已作废。"
+        )
+        state.record_run_event.assert_called_once_with(8091, "zentao_resolved", mock.ANY)
+
+    def test_queued_bug_still_active_outside_the_list_is_left_queued(self):
+        """不在列表里但禅道里还活着（比如换了产品线）—— 不碰它，免得把真该修的单洗掉。"""
+        poller, state, worker = _ui_poller(process_ui_bugs=False)
+        state.queued_runs.return_value = [8091]
+
+        with mock.patch(
+            "zentao_auto_fixer.poller.list_project_bugs", return_value=[]
+        ), mock.patch(
+            "zentao_auto_fixer.poller.bug_vanished_reason", return_value=("", "")
+        ):
             poller.poll_once()
 
         state.mark_zentao_resolved.assert_not_called()
@@ -323,6 +372,7 @@ def _ui_poller(*, process_ui_bugs: bool, max_bugs_per_poll: int = 3):
     state.get_run.return_value = None
     state.pushed_resolved_unverified.return_value = []
     state.non_success_runs.return_value = []
+    state.queued_runs.return_value = []
     state.draining.return_value = False
     worker = mock.Mock()
     worker.dispatch_lock = threading.Lock()

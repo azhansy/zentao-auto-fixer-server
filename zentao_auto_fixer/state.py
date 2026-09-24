@@ -745,6 +745,23 @@ class StateStore:
             ).fetchall()
         return [int(row["bug_id"]) for row in rows]
 
+    def queued_runs(self, project_name: str) -> List[int]:
+        """该项目本地还挂在「排队」的单。
+
+        已删除的单不在列表接口里，已关闭的单也会从列表消失 —— 队列里这批只有反过来核
+        才收得掉（见 poller._check_closed_vanished）。
+        """
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT bug_id FROM bug_runs
+                WHERE project_name = ? AND status IN ('queued', 'writeback_queued')
+                ORDER BY bug_id
+                """,
+                (project_name,),
+            ).fetchall()
+        return [int(row["bug_id"]) for row in rows]
+
     def queue_writeback_retry(self, bug_id: int, max_retries: int = 1) -> bool:
         now = utc_now()
         with self._lock, self._connect() as conn:
@@ -836,8 +853,9 @@ class StateStore:
     def mark_zentao_resolved(self, bug_id: int, zentao_status: str, message: str) -> bool:
         """禅道里已经解决/关闭了，本地那条非成功记录已经过期 —— 收掉它，别再挂在「非成功任务」里。
 
-        只动 RESURRECTABLE_STATUSES 的行（正是看板上那批），已推送/等待交付的单不碰。
-        返回是否真的改了（改过才值得记一条事件）。
+        只动 RESURRECTABLE_STATUSES 的行（正是看板上那批）和还挂在「排队」的行
+        （2026-09-24：队列里的单被删除/关闭后会永远停在「排队」，得能收掉它），
+        已推送/等待交付的单不碰。返回是否真的改了（改过才值得记一条事件）。
         """
         marks = ",".join("?" * len(RESURRECTABLE_STATUSES))
         now = utc_now()
@@ -846,7 +864,8 @@ class StateStore:
                 f"""
                 UPDATE bug_runs
                 SET status = ?, bug_status = ?, error = ?, updated_at = ?, completed_at = ?
-                WHERE bug_id = ? AND status IN ({marks})
+                WHERE bug_id = ?
+                  AND (status IN ({marks}) OR status IN ('queued', 'writeback_queued'))
                 """,
                 (ZENTAO_RESOLVED, zentao_status, message, now, now, bug_id, *sorted(RESURRECTABLE_STATUSES)),
             )
