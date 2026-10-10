@@ -17,6 +17,7 @@ TZ = timezone(timedelta(hours=8))
 EVENT_RESULTS = {
     **dict.fromkeys(('queued', 'started', 'agent_start', 'conflict_retry_queued',
                      'requeued_after_restart', 'manual_requeued', 'ci_repair_start'), '处理中'),
+    'agent_budget_exhausted': '暂停',
     **dict.fromkeys(('failed', 'unable_to_fix', 'no_changes', 'sync_conflict',
                      'merge_request_failed', 'comment_failed', 'resolve_failed',
                      'writeback_exhausted', 'retry_exhausted'), '失败'),
@@ -24,9 +25,9 @@ EVENT_RESULTS = {
     'awaiting_merge': '待合并', 'awaiting_release': '待上线',
     'manual_failure_review': '待人工处理或复验',
     **dict.fromkeys(('skipped_stale', 'skipped_ui', 'skipped_platform',
-                     'already_handled_in_zentao'), '跳过'),
+                     'already_handled_in_zentao', 'zentao_resolved'), '跳过'),
 }
-CATEGORIES = ('成功', '失败', '处理中', '待合并', '待上线', '待人工处理或复验', '跳过')
+CATEGORIES = ('成功', '失败', '处理中', '暂停', '待合并', '待上线', '待人工处理或复验', '跳过')
 
 
 def collect(database: Path, day: date):

@@ -187,7 +187,7 @@ class Poller:
                                 )
                         else:
                             self.state.mark_seen_resolved_once(bug.bug_id, bug.status)
-                    elif existing and existing.status in RESURRECTABLE_STATUSES:
+                    elif existing and existing.status in RESURRECTABLE_STATUSES | {"queued", "writeback_queued"}:
                         # 禅道里已经解决/关闭，本地还挂着「非成功」是过期状态 —— 更新它，
                         # 别让人在看板上以为是待处理（2026-09-16 dashu 反馈）。
                         who = _actor_name(bug.raw.get("resolvedBy") or bug.raw.get("resolved_by"))

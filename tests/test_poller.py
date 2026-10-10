@@ -275,6 +275,20 @@ class UiPollerTests(unittest.TestCase):
         state.update_status.assert_not_called()
         worker.enqueue.assert_not_called()
 
+    def test_resolved_queued_bug_still_in_list_leaves_queue(self):
+        poller, state, worker = _ui_poller(process_ui_bugs=False)
+        state.get_run.return_value = SimpleNamespace(status="queued")
+        state.mark_zentao_resolved.return_value = True
+
+        with mock.patch("zentao_auto_fixer.poller.list_project_bugs", return_value=[_bug("resolved")]):
+            poller.poll_once()
+
+        state.mark_zentao_resolved.assert_called_once_with(
+            1, "resolved", "禅道里已经是 resolved；本地的非成功状态已作废。"
+        )
+        state.record_run_event.assert_called_once_with(1, "zentao_resolved", mock.ANY)
+        worker.enqueue.assert_not_called()
+
 
 class RetryPolicyTests(unittest.TestCase):
     def test_active_technical_failure_is_requeued_once_without_config_switch(self):

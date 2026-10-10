@@ -46,6 +46,23 @@ class DailyReportTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 send('https://open.feishu.cn/example','report')
 
+    def test_paused_and_invalidated_runs_are_not_processing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / 'state.sqlite3'
+            with sqlite3.connect(db) as conn:
+                conn.executescript('CREATE TABLE bug_runs(bug_id, project_name); CREATE TABLE run_events(id INTEGER PRIMARY KEY, bug_id, event, created_at);')
+                conn.executemany('INSERT INTO bug_runs VALUES (?,?)', [(1,'Circllo'), (2,'Circllo'), (3,'Circllo')])
+                conn.executemany('INSERT INTO run_events(bug_id,event,created_at) VALUES (?,?,?)', [
+                    (1,'queued','2026-10-09T01:00:00+00:00'),
+                    (1,'zentao_resolved','2026-10-09T02:00:00+00:00'),
+                    (2,'queued','2026-10-09T01:00:00+00:00'),
+                    (2,'agent_budget_exhausted','2026-10-09T02:00:00+00:00'),
+                    (3,'agent_start','2026-10-09T15:59:00+00:00'),
+                    (3,'resolve_done','2026-10-09T16:01:00+00:00'),
+                ])
+            self.assertEqual(collect(db,date(2026,10,9)),
+                             {'Circllo': {'跳过':1,'暂停':1,'处理中':1}})
+
 
 if __name__ == '__main__':
     unittest.main()
