@@ -489,6 +489,7 @@ class CallSiteTests(unittest.TestCase):
             agent="claude",
             fallback_agent="",
             allow_full_xcodebuild=False,
+            skip_backend_bugs=False,
         )
 
         with mock.patch("zentao_auto_fixer.worker.add_comment"), mock.patch(

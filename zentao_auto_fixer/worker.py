@@ -83,6 +83,7 @@ _FOLLOWING_DONE_TEXT = {
     "sync_conflict": "仓库同步冲突",
     "handled_in_zentao": "已在禅州处理过",
     "rejected_to_reporter": "已退回提单人",
+    "skipped_backend": "涉及后端代码，AI 不处理，请后端同事跟进",
 }
 
 
@@ -484,6 +485,7 @@ class Worker:
                 agent_log,
                 fallback_agent=project.fallback_agent,
                 allow_full_xcodebuild=project.allow_full_xcodebuild,
+                skip_backend=project.skip_backend_bugs,
             )
             self.state.record_run_events(bug_ids, "agent_done", str(checkouts["app"].worktree))
 
@@ -505,12 +507,37 @@ class Worker:
                 LOGGER.info("Bug #%s skipped: agent says platform=%s", run.bug_id, platform)
             remaining = [run for run in batch if run not in skipped]
 
+            # 后端交接（skipBackendBugs）：分诊只要碰到后端，就整条让给后端同事。两个信号都认——
+            # 分诊说改了 backend，或者工作区真的动了 backend（AI 自己说的不算数时才靠这条兜底）。
+            backend_touched = (
+                project.skip_backend_bugs and "backend" in checkouts and checkouts["backend"].has_work()
+            )
+            handed_back = [
+                run
+                for run in remaining
+                if project.skip_backend_bugs
+                and ("backend" in verdicts[run.bug_id]["targets"] or backend_touched)
+            ]
+            for run in handed_back:
+                message = (
+                    "分诊判定这条 Bug 的根因在后端代码（需要改 backend 仓库）；项目配置 skipBackendBugs "
+                    "不处理后端问题，已交由后端同事跟进，未做任何代码改动与提交。"
+                )
+                self.state.update_status(run.bug_id, "skipped_backend", error=message, completed=True)
+                self.state.record_run_event(run.bug_id, "skipped_backend", message)
+                LOGGER.info("Bug #%s handed back to backend colleagues (skipBackendBugs)", run.bug_id)
+            if handed_back:
+                remaining = [run for run in remaining if run not in handed_back]
+
             rejected = [run for run in remaining if verdicts[run.bug_id]["decision"] == "rejected"]
             fixed = [run for run in remaining if verdicts[run.bug_id]["decision"] == "fixed"]
             for run in rejected:
                 self._record_unable_to_fix(run, verdicts[run.bug_id])
             if not fixed:
-                self._record_no_progress()
+                # 整批都交回后端不算「AI 白跑」：这是配置要的结局，计进熔断只会让一个后端单多的项目
+                # 把工作线程暂停到第二天，连 App 的 Bug 一起停掉。
+                if len(handed_back) != len(batch):
+                    self._record_no_progress()
                 LOGGER.info("Worker finished batch %s with nothing to commit", batch_label)
                 return
             with contextlib.ExitStack() as stack:
@@ -613,6 +640,7 @@ class Worker:
         agent_log: Path,
         fallback_agent: str = "",
         allow_full_xcodebuild: bool = False,
+        skip_backend: bool = False,
     ) -> Dict[int, Dict[str, Any]]:
         last_error: Optional[Exception] = None
         bug_ids = [run.bug_id for run in batch]
@@ -640,6 +668,7 @@ class Worker:
                     agent_log,
                     timeout_seconds=self.settings.codex_timeout_seconds,
                     allow_full_xcodebuild=allow_full_xcodebuild,
+                    skip_backend=skip_backend,
                 )
             except AgentQuotaError as exc:
                 last_error = exc
@@ -673,6 +702,7 @@ class Worker:
                     result_path,
                     agent_log,
                     allow_full_xcodebuild=allow_full_xcodebuild,
+                    skip_backend=skip_backend,
                 )
             except AgentCredentialError as exc:
                 last_error = exc

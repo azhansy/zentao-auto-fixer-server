@@ -24,7 +24,7 @@ EVENT_RESULTS = {
     **dict.fromkeys(('resolve_done', 'manual_writeback_done', 'manual_single_lane_verified'), '成功'),
     'awaiting_merge': '待合并', 'awaiting_release': '待上线',
     'manual_failure_review': '待人工处理或复验',
-    **dict.fromkeys(('skipped_stale', 'skipped_ui', 'skipped_platform',
+    **dict.fromkeys(('skipped_stale', 'skipped_ui', 'skipped_platform', 'skipped_backend',
                      'already_handled_in_zentao', 'zentao_resolved'), '跳过'),
 }
 CATEGORIES = ('成功', '失败', '处理中', '暂停', '待合并', '待上线', '待人工处理或复验', '跳过')

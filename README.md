@@ -200,6 +200,7 @@ python3 -m zentao_auto_fixer.server
 | `fallbackAgent` | 可选后备引擎。当前仅在主引擎明确报告额度耗尽时切换；普通报错、超时或鉴权失败不会切换。每次后备启动也计入每日 AI 启动上限。 |
 | `app.repoUrl` / `app.targetBranch` | App 客户端仓库和目标分支。同一个仓库同时覆盖 Android 和 iOS。 |
 | `backend.repoUrl` / `backend.targetBranch` | 后端仓库和目标分支，可留空。留空时 AI 判定为后端问题的 Bug 会被打回给提 Bug 的人。 |
+| `skipBackendBugs` | 是否把后端问题让给后端同事处理。默认 `false`（照常修后端）。设为 `true` 后，分诊判定根因在后端（要改 `backend` 仓库）的 Bug 不再修：不提交、不推送，只在禅道回一条「涉及后端代码，AI 不处理，请后端同事跟进」，本地终态 `skipped_backend`，不会重试（改配置也不会回头重捡，单子已经交给后端同事了）。后端仓库仍会被拉取，只作为 AI 判断问题出没出在后端的只读参照。 |
 | `app.deliveryMode` / `backend.deliveryMode` | 默认 `push`；`merge_request` 推送独立修复分支并通过 GitLab push options 创建 MR，目标为 `targetBranch`。当前 `im/cable` → `pre_release` 使用 MR。创建 `feature/zentao-*` 分支；按仓库要求核验 CI 后开启 Auto Merge，合并成功后才 resolve（Cable 的检查与完成标准见下文）。CI 失败复用同一 MR，按 `AUTO_FIXER_MAX_BUG_RETRIES` 限次修复并计入原有每日 AI 预算；等待 CI 不调用 AI。服务硬性拒绝直推 `im/cable` 的 `pre_release`。 |
 | `repoUrl` / `targetBranch`（旧写法） | 顶层写法仍然兼容，等价于 `app`。 |
 | `onlyCodeBugs` | 是否只处理代码类 Bug，建议保持 `true`。 |
@@ -223,7 +224,7 @@ python3 -m zentao_auto_fixer.server
 入队后每一批 Bug 交给项目配置的 AI 引擎（`agent`，Codex 或 Claude Code）做一次「先分诊、再修复」：
 
 1. AI 读禅道详情，判断问题出在哪、复现在 Android 还是 iOS、要改 App 还是后端。
-2. 默认从 App 入手；确认是后端问题就改后端；两边都要改就一起改。
+2. 默认从 App 入手；确认是后端问题就改后端；两边都要改就一起改。项目配了 `skipBackendBugs: true` 时改成：只改 App，判定为后端问题的 Bug 原样交回，服务在禅道回一条「涉及后端代码，请后端同事跟进」（见上文配置说明）。
 3. 判断不出是什么问题的 Bug 标记为 `rejected`，服务只在本地记为 `unable_to_fix`；不写禅道、不改状态、不重新指派。
 
 **一条 Bug 只能描述一个端**：标题里同时标了多个端（例如 `【mac】【ios】`）的 Bug 不会被修，只在本地静默记录。这一步在调用 AI 之前完成，不消耗 AI 额度。

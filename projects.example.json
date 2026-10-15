@@ -10,6 +10,7 @@
       "skipPlatforms": ["android", "mac"],
       "processUiBugs": false,
       "allowFullXcodeBuild": false,
+      "skipBackendBugs": false,
       "app": {
         "repoUrl": "git@github.com:group/product-a-app.git",
         "targetBranch": "dev"

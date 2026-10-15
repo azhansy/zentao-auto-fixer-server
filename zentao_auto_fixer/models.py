@@ -20,6 +20,7 @@ TERMINAL_STATUSES = {
     "skipped_ui",
     "skipped_manual",
     "skipped_occupied",
+    "skipped_backend",
 }
 # 禅道里已经解决/关闭，本地那条非成功记录已过期（2026-09-16 实测：非成功任务 36 单里 35 单禅道已解决/关闭）。
 # 不进 RESURRECTABLE_STATUSES ⇒ 从看板「非成功任务」里消失；单子若被重新激活仍会重试。
@@ -107,6 +108,7 @@ class ProjectConfig:
     skip_platforms: Tuple[str, ...] = ()
     process_ui_bugs: bool = False
     allow_full_xcodebuild: bool = False
+    skip_backend_bugs: bool = False
 
     @property
     def repo_key(self) -> str:
