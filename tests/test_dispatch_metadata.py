@@ -118,6 +118,7 @@ class DispatchAndMetadataTests(unittest.TestCase):
                    'commit_summary': 'app:abc'}
         state = mock.Mock()
         worker = Worker(SimpleNamespace(zentao_client_script=Path('/tmp/helper')), state)
+        worker._project_for = mock.Mock(return_value=SimpleNamespace(resolve_bug_after_fix=True))
         run = SimpleNamespace(bug_id=1, commit_hash='app:abc', writeback_payload=json.dumps(payload))
         with mock.patch('zentao_auto_fixer.worker.comment_bug') as comment, mock.patch(
             'zentao_auto_fixer.worker.resolve_bug'

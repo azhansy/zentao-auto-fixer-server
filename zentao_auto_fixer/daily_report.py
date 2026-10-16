@@ -21,7 +21,7 @@ EVENT_RESULTS = {
     **dict.fromkeys(('failed', 'unable_to_fix', 'no_changes', 'sync_conflict',
                      'merge_request_failed', 'comment_failed', 'resolve_failed',
                      'writeback_exhausted', 'retry_exhausted'), '失败'),
-    **dict.fromkeys(('resolve_done', 'manual_writeback_done', 'manual_single_lane_verified'), '成功'),
+    **dict.fromkeys(('resolve_done', 'writeback_done', 'manual_writeback_done', 'manual_single_lane_verified'), '成功'),
     'awaiting_merge': '待合并', 'awaiting_release': '待上线',
     'manual_failure_review': '待人工处理或复验',
     **dict.fromkeys(('skipped_stale', 'skipped_ui', 'skipped_platform', 'skipped_backend',

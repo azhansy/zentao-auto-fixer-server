@@ -524,12 +524,12 @@ class StateStore:
         }
 
     def pushed_resolved_unverified(self, project_name: str) -> List[int]:
-        """Pushed bugs that reached resolved but no verified close yet; closed ones vanish from the list API."""
+        """Pushed bugs awaiting a verified close; manually closed active bugs also vanish from the list API."""
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT bug_id FROM bug_runs
-                WHERE status = 'pushed' AND seen_resolved_once = 1 AND verified_closed = 0
+                WHERE status = 'pushed' AND verified_closed = 0
                   AND project_name = ?
                 ORDER BY bug_id
                 """,
@@ -824,13 +824,18 @@ class StateStore:
             return cursor.rowcount > 0
 
     def mark_reactivated(self, bug_id: int) -> bool:
-        """The bug came back active after the AI pushed a fix; returns True only on the first mark."""
+        """A previously resolved bug came back active; returns True only on the first mark."""
         with self._lock, self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE bug_runs
                 SET reactivated_after_auto_fix = 1
                 WHERE bug_id = ? AND reactivated_after_auto_fix = 0
+                  AND (seen_resolved_once = 1 OR (
+                    SELECT event FROM run_events
+                    WHERE bug_id = bug_runs.bug_id AND event IN ('comment_start', 'resolve_done')
+                    ORDER BY id DESC LIMIT 1
+                  ) = 'resolve_done')
                 """,
                 (bug_id,),
             )

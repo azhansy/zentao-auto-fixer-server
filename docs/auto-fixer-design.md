@@ -42,7 +42,7 @@ Auto Fixer Server
               +-- git diff 检查
               +-- 批次 commit
               +-- 普通 push 到目标分支
-              +-- 批量标记禅道 Bug 为 resolved/fixed
+              +-- 按项目 resolveBugAfterFix 配置标记禅道 Bug 为 resolved/fixed
               +-- 记录结果
 ```
 
@@ -102,7 +102,7 @@ Auto Fixer Server
 
 ## 批量处理策略
 
-“批量”指服务每轮可以发现并入队多个 Bug，worker 会把同项目、同仓库、同分支中已经 queued 的 Bug 合成一个批次：同步一次仓库、Codex 一次性修复、验证一次、生成一个批次 commit、push 成功后再统一标记这些 Bug 为已解决。
+“批量”指服务每轮可以发现并入队多个 Bug，worker 会把同项目、同仓库、同分支中已经 queued 的 Bug 合成一个批次：同步一次仓库、Codex 一次性修复、验证一次、生成一个批次 commit、push 成功后再按项目 `resolveBugAfterFix` 配置决定是否标记这些 Bug 为已解决。
 
 推荐顺序：
 
@@ -113,7 +113,7 @@ Auto Fixer Server
 5. worker 按仓库和分支认领 queued Bug，生成一个批次。
 6. Codex 在同一个 worktree 内读取并修复批次里的全部 Bug。
 7. 批次通过验证后生成一个 commit。
-8. push 成功后，服务逐个调用禅道 resolve，把这一批 Bug 标记为 `resolved/fixed`。
+8. 交付完成并写入备注后，服务按项目 `resolveBugAfterFix` 配置决定是否调用禅道 resolve。默认 `true`，标记为 `resolved/fixed`；`false` 则保留禅道状态，本地仍记为成功且不重复修复。
 
 批次 commit 的回滚粒度会变大。如果希望降低风险，应调小 `maxBugsPerPoll` 或拆分产品/分支配置。
 
@@ -183,7 +183,7 @@ commit: fix: zentao batch #123 #124 ...
 git push origin HEAD:<targetBranch>
       |
       v
-resolve #123 #124 ...
+按 resolveBugAfterFix 决定是否 resolve #123 #124 ...
 ```
 
 push 失败时不做 force push。典型失败处理：

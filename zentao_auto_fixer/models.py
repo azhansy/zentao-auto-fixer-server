@@ -109,6 +109,7 @@ class ProjectConfig:
     process_ui_bugs: bool = False
     allow_full_xcodebuild: bool = False
     skip_backend_bugs: bool = False
+    resolve_bug_after_fix: bool = True
 
     @property
     def repo_key(self) -> str:

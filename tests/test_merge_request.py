@@ -50,6 +50,7 @@ class MergeRequestTests(unittest.TestCase):
 
     def test_mixed_delivery_and_writeback_retry_never_resolve_before_merge(self):
         worker = Worker(SimpleNamespace(worker_count=3, zentao_client_script=Path('/helper')), Mock())
+        worker._project_for = Mock(return_value=_load({}))
         worker._rebase_changed_checkouts = Mock(return_value=True)
         worker._record_progress = Mock()
         app = _Checkout('app', 'app', Path('/cache'), Path('/app'), 'dev', 'base')
@@ -83,6 +84,7 @@ class MergeRequestTests(unittest.TestCase):
 
     def test_circllo_dev_push_completes_and_resolves(self):
         worker = Worker(SimpleNamespace(zentao_client_script=Path('/helper')), Mock())
+        worker._project_for = Mock(return_value=_load({}))
         worker._rebase_changed_checkouts = Mock(return_value=True)
         worker._record_progress = Mock()
         backend = _Checkout('backend', 'git@host:circll/circllo.git',

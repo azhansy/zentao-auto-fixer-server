@@ -345,6 +345,7 @@ class FixSuccessStatsTests(unittest.TestCase):
             self.assertTrue(store.mark_verified_closed(1, "closed"))
             self.assertFalse(store.mark_verified_closed(1, "closed"))  # 幂等
             # 2: 验证关闭但之前被打回过 → 不计入
+            store.mark_seen_resolved_once(2, "resolved")
             self.assertTrue(store.mark_reactivated(2))
             self.assertFalse(store.mark_reactivated(2))  # 幂等
             store.mark_verified_closed(2, "closed")
@@ -353,6 +354,57 @@ class FixSuccessStatsTests(unittest.TestCase):
 
             stats = store.fix_success_stats()
             self.assertEqual(stats, {"fixed": 3, "verified_closed": 1})
+
+    def test_unresolved_pushed_bug_can_be_verified_without_false_reactivation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            store.enqueue_first_run(_bug(1), _project())
+            store.update_status(1, "pushed", completed=True)
+
+            self.assertFalse(store.mark_reactivated(1))
+            self.assertTrue(store.mark_verified_closed(1, "closed"))
+            self.assertEqual(store.fix_success_stats(), {"fixed": 1, "verified_closed": 1})
+
+    def test_legacy_resolve_event_marks_reactivation_before_resolved_was_polled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            store.enqueue_first_run(_bug(1), _project())
+            store.record_run_event(1, "comment_start")
+            store.record_run_event(1, "resolve_done")
+            store.update_status(1, "pushed", completed=True)
+
+            self.assertTrue(store.mark_reactivated(1))
+            self.assertFalse(store.mark_reactivated(1))
+            store.mark_verified_closed(1, "closed")
+            self.assertEqual(store.fix_success_stats(), {"fixed": 1, "verified_closed": 0})
+
+    def test_previous_resolve_event_does_not_mark_later_comment_only_fix_reactivated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            store.enqueue_first_run(_bug(1), _project())
+            store.record_run_event(1, "resolve_done")
+            store.record_run_event(1, "comment_start")
+            store.record_run_event(1, "comment_done")
+            store.record_run_event(1, "writeback_done")
+            store.update_status(1, "pushed", completed=True)
+
+            self.assertFalse(store.mark_reactivated(1))
+            store.mark_verified_closed(1, "closed")
+            self.assertEqual(store.fix_success_stats(), {"fixed": 1, "verified_closed": 1})
+
+    def test_pending_verification_includes_pushed_bugs_without_resolve(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = StateStore(Path(tmp) / "state.sqlite3")
+            project = _project()
+            for bug_id in (1, 2, 3, 4):
+                store.enqueue_first_run(_bug(bug_id), project)
+            for bug_id in (1, 2, 3):
+                store.update_status(bug_id, "pushed", completed=True)
+            store.mark_seen_resolved_once(2, "resolved")
+            store.mark_verified_closed(3, "closed")
+
+            self.assertEqual(store.pushed_resolved_unverified(project.name), [1, 2])
+            self.assertEqual(store.pushed_resolved_unverified("other-project"), [])
 
 
 class DrainFlagTests(unittest.TestCase):

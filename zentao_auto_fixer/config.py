@@ -154,6 +154,9 @@ def _project_from_json(item: Dict[str, Any], source: Path) -> ProjectConfig:
     skip_backend_bugs = item.get("skipBackendBugs", False)
     if not isinstance(skip_backend_bugs, bool):
         raise ValueError(f"Project {name or '?'} in {source}: skipBackendBugs must be true or false")
+    resolve_bug_after_fix = item.get("resolveBugAfterFix", True)
+    if not isinstance(resolve_bug_after_fix, bool):
+        raise ValueError(f"Project {name or '?'} in {source}: resolveBugAfterFix must be true or false")
     if missing:
         raise ValueError(f"Project config missing {', '.join(missing)} in {source}")
     return ProjectConfig(
@@ -175,6 +178,7 @@ def _project_from_json(item: Dict[str, Any], source: Path) -> ProjectConfig:
         process_ui_bugs=process_ui_bugs,
         allow_full_xcodebuild=allow_full_xcodebuild,
         skip_backend_bugs=skip_backend_bugs,
+        resolve_bug_after_fix=resolve_bug_after_fix,
     )
 
 

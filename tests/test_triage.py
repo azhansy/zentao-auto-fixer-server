@@ -394,6 +394,7 @@ class CallSiteTests(unittest.TestCase):
 
         state = mock.Mock()
         worker = Worker(SimpleNamespace(worker_count=1, zentao_client_script=Path("/tmp/z.py")), state)
+        worker._project_for = mock.Mock(return_value=SimpleNamespace(resolve_bug_after_fix=True))
         run = SimpleNamespace(
             bug_id=1,
             commit_hash="app:abc",

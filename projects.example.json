@@ -11,6 +11,7 @@
       "processUiBugs": false,
       "allowFullXcodeBuild": false,
       "skipBackendBugs": false,
+      "resolveBugAfterFix": true,
       "app": {
         "repoUrl": "git@github.com:group/product-a-app.git",
         "targetBranch": "dev"
@@ -30,6 +31,7 @@
       "agent": "claude",
       "processUiBugs": false,
       "allowFullXcodeBuild": false,
+      "resolveBugAfterFix": true,
       "repoUrl": "git@github.com:group/product-b.git",
       "targetBranch": "main",
       "onlyCodeBugs": true,

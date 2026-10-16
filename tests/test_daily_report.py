@@ -10,6 +10,19 @@ from zentao_auto_fixer.daily_report import collect, deliver, render, send
 
 
 class DailyReportTests(unittest.TestCase):
+    def test_writeback_without_resolve_counts_as_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / 'state.sqlite3'
+            with sqlite3.connect(db) as conn:
+                conn.executescript('CREATE TABLE bug_runs(bug_id, project_name); CREATE TABLE run_events(id INTEGER PRIMARY KEY, bug_id, event, created_at);')
+                conn.execute('INSERT INTO bug_runs VALUES (?,?)', (1, 'Loopin'))
+                conn.executemany('INSERT INTO run_events(bug_id,event,created_at) VALUES (?,?,?)', [
+                    (1, 'started', '2026-10-09T01:00:00+00:00'),
+                    (1, 'comment_done', '2026-10-09T02:00:00+00:00'),
+                    (1, 'writeback_done', '2026-10-09T02:01:00+00:00'),
+                ])
+            self.assertEqual(collect(db, date(2026, 10, 9)), {'Loopin': {'成功': 1}})
+
     def test_calendar_dedupe_final_result_and_delivery(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

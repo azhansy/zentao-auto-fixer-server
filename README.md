@@ -14,7 +14,7 @@
 4. 拉取最新代码。
 5. 让 AI 按禅道上下文分诊并修复。
 6. 验证、提交、推送。
-7. 给禅道写原因和解决方案，并在整批 push 成功后统一标记为已解决。
+7. 给禅道写原因和解决方案，并按项目配置决定是否在交付完成后标记为已解决。
 
 本服务把这些步骤串起来，适合自部署禅道 + 自部署 GitLab 的团队在内网机器上运行。它不依赖禅道 webhook，也不要求禅道能访问你的本机。
 
@@ -63,7 +63,7 @@ ZenTao Auto Fixer Server
                 +-- 调用 codex / claude + zentao-bug-fixer 分诊并处理整批 Bug
                 +-- 提交批次修复 commit
                 +-- push 到目标分支
-                +-- 批量标记禅道 Bug 为 resolved/fixed
+                +-- 按项目配置标记禅道 Bug 为 resolved/fixed
                 +-- 记录处理状态和事件日志
 ```
 
@@ -81,7 +81,7 @@ ZenTao Auto Fixer Server
 - 不把禅道账号密码、token、GitLab token 写进代码。
 - 不重新实现 `zentao-bug-fixer` 的修复逻辑。
 
-批次处理时，AI 子进程完全不碰禅道，也不做 git 提交。只有当整批代码 commit 并 push 成功后，服务才会逐个写禅道备注并标记为 `resolved/fixed`。最终关闭 `closed` 通常仍由 QA 或人工确认。
+批次处理时，AI 子进程完全不碰禅道，也不做 git 提交。代码交付完成后，服务逐个写禅道备注；项目的 `resolveBugAfterFix` 默认 `true`，会继续标记为 `resolved/fixed`，设为 `false` 则保留 Bug 当前状态。最终关闭 `closed` 通常仍由 QA 或人工确认。
 
 ## 快速启动
 
@@ -122,6 +122,7 @@ ZENTAO_RESOLVED_BUILD=主干
       "skipPlatforms": ["android", "mac"],
       "processUiBugs": false,
       "allowFullXcodeBuild": false,
+      "resolveBugAfterFix": true,
       "app": {
         "repoUrl": "git@gitlab.example.com:group/product-a-app.git",
         "targetBranch": "dev"
@@ -178,7 +179,7 @@ python3 -m zentao_auto_fixer.server
 | `ZENTAO_BASE_URL` | 禅道根地址。 |
 | `ZENTAO_ACCOUNT` / `ZENTAO_PASSWORD` | 禅道账号密码。 |
 | `ZENTAO_API_PREFIX` | 禅道 REST API 前缀，常见为 `/api.php/v1`。 |
-| `ZENTAO_RESOLVE_BUG_AFTER_COMMENT` | 建议保持 `0`；批次模式下服务会在 push 成功后统一 resolve。 |
+| `ZENTAO_RESOLVE_BUG_AFTER_COMMENT` | 保持 `0`，备注本身不改变 Bug 状态；服务是否自动解决由项目的 `resolveBugAfterFix` 控制。 |
 | `ZENTAO_RESOLVED_BUILD` | 自动解决 Bug 时使用的 `resolvedBuild`。 |
 
 完整说明见 [.env.example](.env.example)。
@@ -196,12 +197,13 @@ python3 -m zentao_auto_fixer.server
 | `skipPlatforms` | 暂时不处理的端，可填 `android`、`ios`、`mac`、`windows`、`web`。按 Bug 标题里的方括号标记（如 `【android】`）判断，只有标题标注的端**全部**在这个列表里才跳过，不入队也不调 AI。留空表示都处理。 |
 | `processUiBugs` | 是否处理标题带完整 `【UI】` / `[UI]` 标签的 Bug，大小写不敏感。默认 `false`，跳过且不调用 AI；只有明确改成 JSON 布尔值 `true` 才处理。普通正文里的 `UI` 或 `【UI设计】` 不算该标签。 |
 | `allowFullXcodeBuild` | 是否允许 AI 运行 `xcodebuild build/archive` 等完整构建。默认 `false`，只跑与改动直接相关的测试用例；设为 `true` 才允许完整构建。 |
+| `resolveBugAfterFix` | 修复交付完成并写入备注后，是否将禅道 Bug 标为 `resolved/fixed`。默认 `true`，保持现有行为；设为 JSON 布尔值 `false` 时只写修复备注，保留 Bug 状态，本地仍记为成功且不重复修复。每次回写（含重试、MR 合并后回写）读取当前项目配置；改回 `true` 不会追溯修改已完成的 Bug。 |
 | `agent` | 用哪个 AI 引擎修这个项目，可填 `codex` 或 `claude`，不填默认 `codex`。可执行文件路径分别由 `AUTO_FIXER_CODEX_BIN` 和 `AUTO_FIXER_CLAUDE_BIN` 指定。 |
 | `fallbackAgent` | 可选后备引擎。当前仅在主引擎明确报告额度耗尽时切换；普通报错、超时或鉴权失败不会切换。每次后备启动也计入每日 AI 启动上限。 |
 | `app.repoUrl` / `app.targetBranch` | App 客户端仓库和目标分支。同一个仓库同时覆盖 Android 和 iOS。 |
 | `backend.repoUrl` / `backend.targetBranch` | 后端仓库和目标分支，可留空。留空时 AI 判定为后端问题的 Bug 会被打回给提 Bug 的人。 |
 | `skipBackendBugs` | 是否把后端问题让给后端同事处理。默认 `false`（照常修后端）。设为 `true` 后，分诊判定根因在后端（要改 `backend` 仓库）的 Bug 不再修：不提交、不推送，只在禅道回一条「涉及后端代码，AI 不处理，请后端同事跟进」，本地终态 `skipped_backend`，不会重试（改配置也不会回头重捡，单子已经交给后端同事了）。后端仓库仍会被拉取，只作为 AI 判断问题出没出在后端的只读参照。 |
-| `app.deliveryMode` / `backend.deliveryMode` | 默认 `push`；`merge_request` 推送独立修复分支并通过 GitLab push options 创建 MR，目标为 `targetBranch`。当前 `im/cable` → `pre_release` 使用 MR。创建 `feature/zentao-*` 分支；按仓库要求核验 CI 后开启 Auto Merge，合并成功后才 resolve（Cable 的检查与完成标准见下文）。CI 失败复用同一 MR，按 `AUTO_FIXER_MAX_BUG_RETRIES` 限次修复并计入原有每日 AI 预算；等待 CI 不调用 AI。服务硬性拒绝直推 `im/cable` 的 `pre_release`。 |
+| `app.deliveryMode` / `backend.deliveryMode` | 默认 `push`；`merge_request` 推送独立修复分支并通过 GitLab push options 创建 MR，目标为 `targetBranch`。当前 `im/cable` → `pre_release` 使用 MR。创建 `feature/zentao-*` 分支；按仓库要求核验 CI 后开启 Auto Merge，合并成功后才按 `resolveBugAfterFix` 决定是否 resolve（Cable 的检查与完成标准见下文）。CI 失败复用同一 MR，按 `AUTO_FIXER_MAX_BUG_RETRIES` 限次修复并计入原有每日 AI 预算；等待 CI 不调用 AI。服务硬性拒绝直推 `im/cable` 的 `pre_release`。 |
 | `repoUrl` / `targetBranch`（旧写法） | 顶层写法仍然兼容，等价于 `app`。 |
 | `onlyCodeBugs` | 是否只处理代码类 Bug，建议保持 `true`。 |
 | `maxBugsPerPoll` | 兼容旧配置；不再限制入队或合并批次，避免小 ID 被留到后续轮次。每次只修一个 Bug。 |
@@ -349,14 +351,22 @@ cat .auto-fixer/logs/batch-<first>-<last>-triage.json   # AI 的分诊结论
 
 建议先在禅道里明确哪些 Bug 类型属于代码问题。服务默认只处理代码类 Bug，避免把需求、配置、环境、测试数据问题交给自动修复。
 
-如果希望批次 push 成功后自动进入已解决状态，保持：
+在 `projects.json` 对应项目中配置：
+
+```json
+"resolveBugAfterFix": false
+```
+
+`false` 表示交付完成后仅写修复备注，由人工确认后修改状态；`true`（默认值）表示自动标为已解决。两种模式都会记为本地成功和日报成功，不会因 Bug 仍是激活状态而重复修复，也不会把尚未解决的 Bug 误记为「重新激活」。配置在下一次回写时生效，包括等待合并和回写重试；已完成的记录不追溯处理。
+
+`.env` 保持：
 
 ```bash
 ZENTAO_RESOLVE_BUG_AFTER_COMMENT=0
 ZENTAO_RESOLVED_BUILD=主干
 ```
 
-批次模式下，AI 子进程完全不碰禅道；外层服务在 commit 和 push 成功后调用 `zentao-bug-fixer` skill 写备注并把这一批 Bug 标记为 `resolved/fixed`，分诊失败的 Bug 则写备注并指派回提 Bug 的人。它不会执行最终关闭。
+批次模式下，AI 子进程完全不碰禅道；外层服务在交付完成后调用 `zentao-bug-fixer` skill 写备注，并按 `resolveBugAfterFix` 决定是否标记为 `resolved/fixed`。它不会执行最终关闭。
 
 ## 本机、内网和不同局域网
 

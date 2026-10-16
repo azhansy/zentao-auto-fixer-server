@@ -1279,6 +1279,13 @@ class Worker:
         commit_summary = payload.get("commit_summary") or run.commit_hash
         if not self._still_actionable_before_writeback(run):
             return
+        project = self._project_for(run)
+        if project is None:
+            error = "Cannot read project configuration before ZenTao writeback; not guessing whether to resolve."
+            self.state.record_run_event(run.bug_id, "comment_failed", error)
+            self.state.update_status(run.bug_id, "writeback_failed", error=error,
+                                     commit_hash=commit_summary, handled_once=True, completed=True)
+            return
         self.state.record_run_event(run.bug_id, "comment_start", commit_summary)
         try:
             comment_bug(
@@ -1309,13 +1316,15 @@ class Worker:
             return
 
         error = ""
-        try:
-            resolve_bug(self.settings.zentao_client_script, run.bug_id)
-            self.state.record_run_event(run.bug_id, "resolve_done", "resolved/fixed")
-        except ZenTaoResolveError as exc:
-            error = str(exc)
-            self.state.record_run_event(run.bug_id, "resolve_failed", error)
-            LOGGER.error("Resolve failed bug #%s after push: %s", run.bug_id, exc)
+        if project.resolve_bug_after_fix:
+            try:
+                resolve_bug(self.settings.zentao_client_script, run.bug_id)
+                self.state.mark_seen_resolved_once(run.bug_id, "resolved")
+                self.state.record_run_event(run.bug_id, "resolve_done", "resolved/fixed")
+            except ZenTaoResolveError as exc:
+                error = str(exc)
+                self.state.record_run_event(run.bug_id, "resolve_failed", error)
+                LOGGER.error("Resolve failed bug #%s after push: %s", run.bug_id, exc)
         self.state.update_status(
             run.bug_id,
             "pushed" if not error else "writeback_failed",
@@ -1324,6 +1333,8 @@ class Worker:
             handled_once=True,
             completed=True,
         )
+        if not error:
+            self.state.record_run_event(run.bug_id, "writeback_done", commit_summary)
 
 
 class _Checkout:

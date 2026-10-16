@@ -75,7 +75,7 @@ class CableReleaseTests(unittest.TestCase):
     def test_old_release_wait_runs_normal_comment_and_resolve(self):
         state = Mock()
         worker = Worker(SimpleNamespace(data_dir=self.root, zentao_client_script=Path('/helper')), state)
-        worker._project_for = Mock(return_value=SimpleNamespace(enabled=True))
+        worker._project_for = Mock(return_value=SimpleNamespace(enabled=True, resolve_bug_after_fix=True))
         worker._record_progress = Mock()
         run = SimpleNamespace(bug_id=1, status='awaiting_release', error='等待 PRE 验收',
                               writeback_payload=json.dumps(self.payload), commit_hash='backend:fix')
@@ -97,6 +97,22 @@ class CableReleaseTests(unittest.TestCase):
             comment.assert_not_called()
             resolve.assert_not_called()
             self.assertEqual(state.update_status.call_args.args[1], 'awaiting_merge')
+
+    def test_merged_fix_can_complete_without_resolving_bug(self):
+        state = Mock()
+        worker = Worker(SimpleNamespace(data_dir=self.root, zentao_client_script=Path('/helper')), state)
+        worker._project_for = Mock(return_value=SimpleNamespace(enabled=True, resolve_bug_after_fix=False))
+        worker._still_actionable_before_writeback = Mock(return_value=True)
+        run = SimpleNamespace(bug_id=1, status='awaiting_merge', error='',
+                              writeback_payload=json.dumps(self.payload), commit_hash='backend:fix')
+        with patch('zentao_auto_fixer.worker.GitLab', return_value=self.client), \
+             patch('zentao_auto_fixer.worker.comment_bug') as comment, \
+             patch('zentao_auto_fixer.worker.resolve_bug') as resolve:
+            worker._check_merge_requests(run)
+        comment.assert_called_once()
+        resolve.assert_not_called()
+        self.assertEqual(state.update_status.call_args.args[1], 'pushed')
+        state.record_run_event.assert_any_call(1, 'writeback_done', 'backend:fix')
 
     def test_circllo_dev_does_not_use_cable_gate(self):
         self.assertTrue(is_cable_release(self.item))

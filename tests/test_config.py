@@ -8,6 +8,24 @@ from zentao_auto_fixer.config import Settings
 
 
 class ConfigTests(unittest.TestCase):
+    def test_resolve_bug_after_fix_defaults_on_and_requires_boolean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "projects.json"
+            project = {"name": "A", "zentaoProductId": 8,
+                       "repoUrl": "git@example.com:a.git", "targetBranch": "develop"}
+            path.write_text(json.dumps({"projects": [project]}), encoding="utf-8")
+            self.assertTrue(_load_single_project(path).resolve_bug_after_fix)
+            for value in (True, False):
+                project["resolveBugAfterFix"] = value
+                path.write_text(json.dumps({"projects": [project]}), encoding="utf-8")
+                self.assertEqual(_load_single_project(path).resolve_bug_after_fix, value)
+            for value in ("false", 0, None, []):
+                with self.subTest(value=value):
+                    project["resolveBugAfterFix"] = value
+                    path.write_text(json.dumps({"projects": [project]}), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "resolveBugAfterFix must be true or false"):
+                        _load_single_project(path)
+
     def test_load_projects_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "projects.json"
