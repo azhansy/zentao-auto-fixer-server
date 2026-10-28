@@ -49,7 +49,8 @@ class MergeRequestTests(unittest.TestCase):
                 push_merge_request(worker, 'zentao-fix/2', 'dev', 'fix: 检查')
 
     def test_mixed_delivery_and_writeback_retry_never_resolve_before_merge(self):
-        worker = Worker(SimpleNamespace(worker_count=3, zentao_client_script=Path('/helper')), Mock())
+        worker = Worker(SimpleNamespace(worker_count=3, zentao_client_script=Path('/helper'),
+                                       git_author_name='Auto Fixer', git_author_email='fixer@example.com'), Mock())
         worker._project_for = Mock(return_value=_load({}))
         worker._rebase_changed_checkouts = Mock(return_value=True)
         worker._record_progress = Mock()
@@ -60,6 +61,7 @@ class MergeRequestTests(unittest.TestCase):
         with patch('zentao_auto_fixer.worker.has_changes', return_value=False), \
              patch('zentao_auto_fixer.worker.head_commit', return_value='abcdef1234567890'), \
              patch('zentao_auto_fixer.worker.changed_files', return_value=[]), \
+             patch('zentao_auto_fixer.worker.commit_all', return_value='abcdef1234567890') as commit, \
              patch('zentao_auto_fixer.worker.push_head_dry_run') as dry, \
              patch('zentao_auto_fixer.worker.push_head_to_branch') as push, \
              patch('zentao_auto_fixer.worker.push_merge_request', return_value=url) as mr, \
@@ -70,6 +72,10 @@ class MergeRequestTests(unittest.TestCase):
             dry.assert_called_once_with(Path('/app'), 'dev')
             push.assert_called_once_with(Path('/app'), 'dev')
             self.assertEqual(mr.call_args.args[2], 'pre_release')
+            self.assertEqual(commit.call_count, 2)
+            self.assertTrue(all(call.kwargs['amend'] for call in commit.call_args_list))
+            self.assertTrue(all(call.args[1].endswith('通过 <zentao-bug-fixer>自动修复')
+                                for call in commit.call_args_list))
             self.assertEqual(worker.state.update_status.call_args.args[1], 'awaiting_merge')
             payload = worker.state.set_writeback_payload.call_args.args[1]
             self.assertIn(url, payload)
@@ -83,7 +89,8 @@ class MergeRequestTests(unittest.TestCase):
         self.assertIn('merge_request_failed', TERMINAL_STATUSES)
 
     def test_circllo_dev_push_completes_and_resolves(self):
-        worker = Worker(SimpleNamespace(zentao_client_script=Path('/helper')), Mock())
+        worker = Worker(SimpleNamespace(zentao_client_script=Path('/helper'),
+                                       git_author_name='Auto Fixer', git_author_email='fixer@example.com'), Mock())
         worker._project_for = Mock(return_value=_load({}))
         worker._rebase_changed_checkouts = Mock(return_value=True)
         worker._record_progress = Mock()
@@ -93,6 +100,7 @@ class MergeRequestTests(unittest.TestCase):
         with patch('zentao_auto_fixer.worker.has_changes', return_value=False), \
              patch('zentao_auto_fixer.worker.head_commit', return_value='fix'), \
              patch('zentao_auto_fixer.worker.changed_files', return_value=[]), \
+             patch('zentao_auto_fixer.worker.commit_all', return_value='fix'), \
              patch('zentao_auto_fixer.worker.push_head_dry_run'), \
              patch('zentao_auto_fixer.worker.push_head_to_branch') as push, \
              patch('zentao_auto_fixer.worker.push_merge_request') as mr, \
@@ -110,6 +118,43 @@ class MergeRequestTests(unittest.TestCase):
         self.assertFalse(_looks_like_non_fast_forward('remote: You are not allowed to push code to protected branches\n[remote rejected] (pre-receive hook declined)'))
         self.assertTrue(_looks_like_non_fast_forward('[rejected] dev -> dev (fetch first)'))
         self.assertTrue(_looks_like_non_fast_forward('non-fast-forward'))
+
+    def test_ci_repair_pushes_footer_with_or_without_agent_commit(self):
+        for agent_commits in (False, True):
+            with self.subTest(agent_commits=agent_commits), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                remote, _seed, repo = _clone_pair(root)
+                baseline = head_commit(repo)
+                worker = Worker(SimpleNamespace(
+                    max_bug_retries=2, logs_dir=root / 'logs', codex_timeout_seconds=30,
+                    zentao_client_script=Path('/helper'), agent_bin=lambda agent: agent,
+                    git_author_name='Auto Fixer', git_author_email='fixer@example.com'), Mock())
+                worker._claim_agent_budget = Mock(return_value=True)
+                worker._project_for = Mock(return_value=_load({}))
+                worker._prepare_checkout = Mock(return_value=_Checkout(
+                    'app', str(remote), root / 'cache', repo, 'dev', baseline))
+                run = SimpleNamespace(bug_id=42, title='修复问题')
+                item = {'kind': 'app', 'repo_url': str(remote), 'source': 'dev',
+                        'sha': baseline, 'url': 'https://gitlab.example/app/-/merge_requests/1'}
+                payload = {'commit_summary': f'app:{baseline}'}
+                info = 'AI / 模型：DeepSeek（deepseek-flash）；执行器：Claude Code'
+
+                def repair(*args, **kwargs):
+                    (repo / 'fix.txt').write_text('verified fix\n')
+                    if agent_commits:
+                        _git(repo, 'add', '-A')
+                        _git(repo, 'commit', '-qm', 'agent repair')
+                    return {42: {'decision': 'fixed', 'solution': '修复问题', 'ai_info': info}}
+
+                with patch('zentao_auto_fixer.worker.run_agent_batch_fix', side_effect=repair), \
+                     patch('zentao_auto_fixer.worker.remove_worktree'):
+                    worker._repair_merge_request(run, payload, item, 'test failed')
+
+                self.assertEqual(_git_output(remote, 'log', 'dev', '-1', '--format=%B'),
+                                 f'fix(42): 修复问题\n\n---------\n{info}\n通过 <zentao-bug-fixer>自动修复')
+                self.assertEqual(_git_output(remote, 'rev-parse', 'dev^'), baseline)
+                self.assertEqual(_git_output(remote, 'show', 'dev:fix.txt'), 'verified fix')
+                self.assertEqual(item['sha'], head_commit(repo))
 
 class AutoMergeLifecycleTests(unittest.TestCase):
     def setUp(self):

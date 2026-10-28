@@ -414,6 +414,8 @@ __pycache__/
 
 禅道修复备注会在 Skill 署名前列出本次 AI、模型和执行器。Claude Code 使用运行结果中的 `modelUsage`，不按启动脚本名称推测；无法核验时明确标记未确认。该信息随回写内容持久化，回写重试不会套用新配置。
 
+自动修复提交的正文末尾同样列出本次运行的 AI、模型和执行器，并以 `通过 <zentao-bug-fixer>自动修复` 收尾；提交标题保持原有格式。普通修复、批量修复和 CI 补修均使用该尾注；AI 自行提交的尚未推送 HEAD 也会补齐，不回改历史远端提交。
+
 ### GitLab MR 自动交付
 
 配置 `AUTO_FIXER_GITLAB_URL=https://gitlab.example.com` 与 `AUTO_FIXER_GITLAB_TOKEN_FILE`（服务账号可读取的私密文件，令牌需 API 权限以读取 CI、开启 MR Auto Merge，不纳入 Git）。

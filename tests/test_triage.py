@@ -143,38 +143,45 @@ class CommentTextTests(unittest.TestCase):
 class CommitMessageTests(unittest.TestCase):
     def test_single_bug_uses_conventional_commit_with_bug_id_as_scope(self):
         run = _run(7499, "【Android】查看已删除子任务报错")
-        verdicts = {7499: {"solution": "toSubDetailLoaded 改用 errorMessage()，不再拼裸错误码"}}
+        info = "AI / 模型：DeepSeek（deepseek-flash）；执行器：Claude Code"
+        verdicts = {7499: {"solution": "toSubDetailLoaded 改用 errorMessage()，不再拼裸错误码", "ai_info": info}}
 
         message = _commit_message([run], verdicts)
 
-        self.assertEqual(message, "fix(7499): toSubDetailLoaded 改用 errorMessage()，不再拼裸错误码")
+        self.assertEqual(message, "fix(7499): toSubDetailLoaded 改用 errorMessage()，不再拼裸错误码"
+                         f"\n\n---------\n{info}\n通过 <zentao-bug-fixer>自动修复")
 
     def test_falls_back_to_understanding_then_title_when_solution_is_missing(self):
         run = _run(7500, "标题兜底")
         self.assertEqual(
-            _commit_message([run], {7500: {"understanding": "只有理解，没有 solution"}}),
+            _commit_message([run], {7500: {"understanding": "只有理解，没有 solution"}}).splitlines()[0],
             "fix(7500): 只有理解，没有 solution",
         )
-        self.assertEqual(_commit_message([run], {7500: {}}), "fix(7500): 标题兜底")
+        message = _commit_message([run], {7500: {}})
+        self.assertEqual(message.splitlines()[0], "fix(7500): 标题兜底")
+        self.assertIn("AI / 模型：未确认（无运行时记录）", message)
+        self.assertTrue(message.endswith("通过 <zentao-bug-fixer>自动修复"))
 
     def test_long_summary_is_truncated_to_a_reasonable_subject_length(self):
         run = _run(7501, "标题")
         long_solution = "改动说明" * 30
         message = _commit_message([run], {7501: {"solution": long_solution}})
         self.assertTrue(message.startswith("fix(7501): "))
-        self.assertLessEqual(len(message.split(": ", 1)[1]), 72)
-        self.assertTrue(message.endswith("…"))
+        subject = message.splitlines()[0]
+        self.assertLessEqual(len(subject.split(": ", 1)[1]), 72)
+        self.assertTrue(subject.endswith("…"))
 
     def test_raw_bug_path_prefix_is_not_used_as_commit_summary(self):
         run = _run(7925, "app：ios/App/Sources/Root/CirclloRootView.swift 的 preparePaidEnrollment")
         message = _commit_message([run], {7925: {}})
-        self.assertEqual(message, "fix(7925): preparePaidEnrollment")
+        self.assertEqual(message.splitlines()[0], "fix(7925): preparePaidEnrollment")
 
     def test_multi_bug_batch_lists_each_bug_on_its_own_line(self):
         runs = [_run(7499, "标题 A"), _run(7500, "标题 B")]
+        info = "AI / 模型：DeepSeek（deepseek-flash）；执行器：Claude Code"
         verdicts = {
-            7499: {"solution": "修复 A"},
-            7500: {"solution": "修复 B"},
+            7499: {"solution": "修复 A", "ai_info": info},
+            7500: {"solution": "修复 B", "ai_info": info},
         }
 
         message = _commit_message(runs, verdicts)
@@ -182,6 +189,16 @@ class CommitMessageTests(unittest.TestCase):
         self.assertEqual(message.splitlines()[0], "fix(7499,7500): 修复 A；修复 B")
         self.assertIn("- #7499 修复 A", message)
         self.assertIn("- #7500 修复 B", message)
+        self.assertEqual(message.count(info), 1)
+        self.assertEqual(message.count("通过 <zentao-bug-fixer>自动修复"), 1)
+        self.assertTrue(message.endswith("通过 <zentao-bug-fixer>自动修复"))
+
+    def test_batch_preserves_each_distinct_runtime_ai_info(self):
+        runs = [_run(7499, "标题 A"), _run(7500, "标题 B")]
+        infos = ["AI / 模型：未确认；执行器：Codex（无运行时模型记录）",
+                 "AI / 模型：DeepSeek（deepseek-flash）；执行器：Claude Code"]
+        message = _commit_message(runs, {run.bug_id: {"ai_info": info} for run, info in zip(runs, infos)})
+        self.assertIn("\n".join(infos), message)
 
 
 def _run(bug_id: int, title: str) -> RunRecord:

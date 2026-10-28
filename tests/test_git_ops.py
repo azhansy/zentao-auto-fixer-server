@@ -5,6 +5,7 @@ from pathlib import Path
 
 from zentao_auto_fixer.git_ops import (
     RebaseConflictError,
+    commit_all,
     continue_rebase,
     export_patch,
     head_commit,
@@ -63,6 +64,28 @@ class ExportPatchTests(unittest.TestCase):
             self.assertIn("Subject: [PATCH] fix", patch)
             self.assertIn("-before", patch)
             self.assertIn("+after", patch)
+
+
+class CommitAllTests(unittest.TestCase):
+    def test_new_and_agent_committed_fixes_keep_footer_and_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            remote, _seed, worker = _clone_pair(Path(tmp))
+            baseline = head_commit(worker)
+            (worker / "fix.txt").write_text("fix\n")
+            message = "fix(42): 修复问题\n\n通过 <zentao-bug-fixer>自动修复"
+            commit_all(worker, message, "Auto Fixer", "fixer@example.com")
+            self.assertEqual(_git_output(worker, "log", "-1", "--format=%B"), message)
+            tree = _git_output(worker, "rev-parse", "HEAD^{tree}")
+
+            _git(worker, "commit", "--amend", "-qm", "agent commit without footer")
+            agent_head = head_commit(worker)
+            amended = commit_all(worker, message, "Auto Fixer", "fixer@example.com", amend=True)
+            self.assertNotEqual(amended, agent_head)
+            self.assertEqual(_git_output(worker, "log", "-1", "--format=%B"), message)
+            self.assertEqual(_git_output(worker, "rev-parse", "HEAD^{tree}"), tree)
+            self.assertEqual(_git_output(worker, "rev-parse", "HEAD^"), baseline)
+            self.assertEqual(_git_output(remote, "rev-parse", "dev"), baseline)
+            self.assertEqual(_git_output(worker, "status", "--porcelain"), "")
 
 
 class RebaseLatestTests(unittest.TestCase):

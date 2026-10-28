@@ -810,16 +810,14 @@ class Worker:
 
         commit_message = _commit_message(fixed, verdicts)
         for checkout in changed:
-            if has_changes(checkout.worktree):
-                self.state.record_run_events(bug_ids, f"commit_start_{checkout.kind}", commit_message)
-                commit_hash = commit_all(
-                    checkout.worktree,
-                    commit_message,
-                    self.settings.git_author_name,
-                    self.settings.git_author_email,
-                )
-            else:
-                commit_hash = head_commit(checkout.worktree)
+            self.state.record_run_events(bug_ids, f"commit_start_{checkout.kind}", commit_message)
+            commit_hash = commit_all(
+                checkout.worktree,
+                commit_message,
+                self.settings.git_author_name,
+                self.settings.git_author_email,
+                amend=not has_changes(checkout.worktree),
+            )
             self.state.record_run_events(bug_ids, f"commit_done_{checkout.kind}", commit_hash)
 
         while True:
@@ -1221,9 +1219,9 @@ class Worker:
             files = run_git(["diff", "--name-only", checkout.baseline], cwd=checkout.worktree).splitlines()
             if any(f == ".gitlab-ci.yml" or f.startswith((".gitlab/", "scripts/ci")) for f in files):
                 raise GitLabError("CI repair modified pipeline gates; independent review required")
-            if has_changes(checkout.worktree):
-                commit_all(checkout.worktree, _commit_message([run], verdicts),
-                           self.settings.git_author_name, self.settings.git_author_email)
+            commit_all(checkout.worktree, _commit_message([run], verdicts),
+                       self.settings.git_author_name, self.settings.git_author_email,
+                       amend=not has_changes(checkout.worktree))
             with self._lock_for_repo(checkout.repo_url):
                 push_head_to_branch(checkout.worktree, item["source"])
             item["sha"] = head_commit(checkout.worktree)
@@ -1443,14 +1441,17 @@ def _batch_label(batch: List[RunRecord]) -> str:
 
 def _commit_message(fixed: List[RunRecord], verdicts: Dict[int, Dict[str, Any]]) -> str:
     """Conventional-commit style with the ZenTao bug id as scope: fix(7499): 具体修复的内容."""
-    if len(fixed) == 1:
-        run = fixed[0]
-        return f"fix({run.bug_id}): {_fix_summary(verdicts.get(run.bug_id, {}), run.title)}"
     ids = ",".join(str(run.bug_id) for run in fixed)
     summary = "；".join(_fix_summary(verdicts.get(run.bug_id, {}), run.title) for run in fixed)
     lines = [f"fix({ids}): {summary}"]
-    for run in fixed:
-        lines.append(f"- #{run.bug_id} {_fix_summary(verdicts.get(run.bug_id, {}), run.title)}")
+    if len(fixed) > 1:
+        for run in fixed:
+            lines.append(f"- #{run.bug_id} {_fix_summary(verdicts.get(run.bug_id, {}), run.title)}")
+    ai_infos = dict.fromkeys(
+        verdicts.get(run.bug_id, {}).get("ai_info") or "AI / 模型：未确认（无运行时记录）"
+        for run in fixed
+    )
+    lines.extend(["", "---------", *ai_infos, "通过 <zentao-bug-fixer>自动修复"])
     return "\n".join(lines)
 
 

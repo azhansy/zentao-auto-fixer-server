@@ -170,7 +170,7 @@ def export_patch(repo: Path, baseline: str) -> str:
     return run_git(["format-patch", f"{baseline}..HEAD", "--stdout"], cwd=repo)
 
 
-def commit_all(repo: Path, message: str, author_name: str, author_email: str) -> str:
+def commit_all(repo: Path, message: str, author_name: str, author_email: str, *, amend: bool = False) -> str:
     env = os.environ.copy()
     env.update(
         {
@@ -181,7 +181,10 @@ def commit_all(repo: Path, message: str, author_name: str, author_email: str) ->
         }
     )
     run_git(["add", "-A"], cwd=repo, env=env)
-    run_git(["commit", "-m", message], cwd=repo, env=env)
+    args = ["commit", "-m", message]
+    if amend:
+        args.append("--amend")
+    run_git(args, cwd=repo, env=env)
     return run_git(["rev-parse", "HEAD"], cwd=repo)
 
 
