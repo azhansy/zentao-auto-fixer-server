@@ -15,8 +15,10 @@ from .agent_runner import (
     AgentCredentialError,
     AgentError,
     AgentQuotaError,
+    AgentReviewRejected,
     TriageResultError,
     run_agent_batch_fix,
+    run_agent_review,
     stop_active_agents,
 )
 from .config import Settings
@@ -322,7 +324,7 @@ class Worker:
         return "" if actionable else reason
 
     def _claim_agent_budget(self) -> bool:
-        """One batch costs one agent run. The ceiling is the backstop against a runaway poll loop."""
+        """Gate new work; repair, review and rework starts each count toward the daily ceiling."""
         if self.state.draining():
             return False  # 排空（准备重启）：不派新单，在跑的批次不受影响
         if time.time() < self._credential_pause_until:
@@ -653,6 +655,8 @@ class Worker:
                 f"{agent} {attempt}/{self.settings.codex_attempts}",
             )
             if attempt > 1:
+                if not self._claim_agent_run():
+                    raise AgentError("Agent retry blocked: daily agent budget exhausted")
                 for checkout in checkouts.values():
                     reset_hard_clean(checkout.worktree, checkout.baseline)
                 self.state.record_run_events(bug_ids, "worktrees_reset", "discarded the previous attempt")
@@ -851,11 +855,19 @@ class Worker:
             if not retry_refresh:
                 break
 
+        rework_state = {"attempts": 0}
+        if not self._review_and_rework(
+            fixed, checkouts, verdicts, agent, allow_full_xcodebuild,
+            changed=changed, rework_state=rework_state,
+        ):
+            return
         pushed: List[str] = []
         merge_requests: List[Dict[str, str]] = []
-        for checkout in changed:
+        while any(checkout.kind not in pushed for checkout in changed):
+            checkout = next(checkout for checkout in changed if checkout.kind not in pushed)
             while True:
                 try:
+                    commit_message = _commit_message(fixed, verdicts)
                     self.state.record_run_events(bug_ids, f"push_start_{checkout.kind}", checkout.target_branch)
                     if checkout.delivery_mode == "merge_request":
                         source = f"feature/zentao-{bug_ids[0]}-{bug_ids[-1]}-{head_commit(checkout.worktree)[:12]}"
@@ -870,15 +882,31 @@ class Worker:
                 except GitError as exc:
                     if checkout.delivery_mode == "push" and _looks_like_non_fast_forward(str(exc)):
                         self.state.record_run_events(bug_ids, f"push_retry_{checkout.kind}", str(exc))
-                        if not self._rebase_changed_checkouts(
-                            fixed,
-                            [checkout],
-                            checkouts,
-                            verdicts,
-                            batch_label,
-                            agent,
-                            allow_full_xcodebuild,
-                        ):
+                        protected_heads = {kind: head_commit(checkouts[kind].worktree) for kind in pushed}
+                        try:
+                            if not self._rebase_changed_checkouts(
+                                fixed, [checkout], checkouts, verdicts, batch_label,
+                                agent, allow_full_xcodebuild,
+                            ) or not self._review_and_rework(
+                                fixed, checkouts, verdicts, agent, allow_full_xcodebuild,
+                                changed=changed, protected_heads=protected_heads,
+                                rework_state=rework_state,
+                            ):
+                                if not pushed:
+                                    return
+                                raise AgentError("Remote refresh or review could not finish")
+                        except Exception as review_error:
+                            commits = " ".join(f"{item.kind}:{head_commit(item.worktree)}" for item in changed)
+                            detail = str(review_error)
+                            if pushed:
+                                delivered = " ".join(f"{kind}:{sha}" for kind, sha in protected_heads.items())
+                                detail = (f"部分仓库 {'、'.join(pushed)} 已推送（{delivered}），其余修复未交付；"
+                                          f"自动重试已停止，需人工处理：{detail}")
+                            patches = [self._save_conflict_patch(item, batch_label)
+                                       for item in changed if item.kind not in pushed]
+                            if any(patches):
+                                detail += "\n未交付修复补丁：" + ", ".join(path for path in patches if path)
+                            self._fail_batch(fixed, "retry_exhausted" if pushed else "failed", detail, commits)
                             return
                         continue
                     detail = f"{checkout.kind}: {exc}"
@@ -913,6 +941,142 @@ class Worker:
         urls = ", ".join(bug_view_url(run.bug_id) for run in fixed)
         LOGGER.info("Worker pushed batch %s commits=%s urls=%s", batch_label, commit_summary, urls)
 
+    def _review_fix(self, fixed, checkouts, verdicts, agent):
+        bug_ids = [run.bug_id for run in fixed]
+        label = _batch_label(fixed)
+        try:
+            heads = {kind: head_commit(checkout.worktree) for kind, checkout in checkouts.items()}
+            if any(has_changes(checkout.worktree) for checkout in checkouts.values()):
+                raise AgentError("Independent review requires clean, committed worktrees")
+            fixing_agent = verdicts[fixed[0].bug_id].get("ai_agent", agent)
+            reviewer = "codex" if fixing_agent == "claude" else "claude"
+            context = {
+                "bugs": [{"id": run.bug_id, "title": run.title} for run in fixed],
+                "verdicts": {run.bug_id: verdicts[run.bug_id] for run in fixed},
+                "repositories": {
+                    kind: {"path": str(checkout.worktree), "baseline": checkout.baseline, "head": heads[kind],
+                           "diff": run_git(["diff", "--binary", checkout.baseline, "--"], cwd=checkout.worktree)}
+                    for kind, checkout in checkouts.items()
+                },
+            }
+            if not self._claim_agent_run():
+                raise AgentError("Independent review blocked: daily agent budget exhausted")
+            path = self.settings.logs_dir / f"batch-{bug_ids[0]}-{bug_ids[-1]}-review"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.state.record_run_events(bug_ids, "review_start", reviewer)
+            primary = checkouts.get("app") or next(iter(checkouts.values()))
+            try:
+                review = run_agent_review(
+                    reviewer, self.settings.agent_bin(reviewer), primary.worktree,
+                    [checkout.worktree for checkout in checkouts.values() if checkout is not primary],
+                    context, path.with_suffix(".log"), timeout_seconds=self.settings.codex_timeout_seconds,
+                )
+            finally:
+                if any(head_commit(checkout.worktree) != heads[kind] or has_changes(checkout.worktree)
+                       for kind, checkout in checkouts.items()):
+                    raise AgentError("Independent reviewer modified a repository; review invalidated")
+            review["repositories"] = {kind: {"baseline": checkout.baseline, "head": heads[kind]}
+                                      for kind, checkout in checkouts.items()}
+            path.with_suffix(".json").write_text(json.dumps(review, ensure_ascii=False), encoding="utf-8")
+            for run in fixed:
+                verdicts[run.bug_id]["independent_review"] = review
+            self.state.record_run_events(bug_ids, "review_passed", json.dumps(review, ensure_ascii=False))
+        except Exception as exc:
+            for checkout in checkouts.values():
+                self._save_conflict_patch(checkout, label)
+            self.state.record_run_events(bug_ids, "review_failed", str(exc))
+            raise
+
+    def _review_and_rework(
+        self, fixed, checkouts, verdicts, agent, allow_full_xcodebuild,
+        changed=None, protected_heads=None, ci_checkout=None, rework_state=None,
+    ):
+        """Only a valid review rejection may start another bounded repair."""
+        changed = changed if changed is not None else []
+        protected_heads = dict(protected_heads or {})
+        rework_state = rework_state if rework_state is not None else {"attempts": 0}
+        bug_ids = [run.bug_id for run in fixed]
+        label = _batch_label(fixed)
+        project = self._project_for(fixed[0])
+        skip_backend = getattr(project, "skip_backend_bugs", False)
+        if skip_backend and "backend" in checkouts:
+            protected_heads.setdefault("backend", head_commit(checkouts["backend"].worktree))
+        if ci_checkout is not None:
+            protected_heads.update({kind: head_commit(checkout.worktree)
+                                    for kind, checkout in checkouts.items() if checkout is not ci_checkout})
+        try:
+            while True:
+                if any(head_commit(checkouts[kind].worktree) != sha or has_changes(checkouts[kind].worktree)
+                       for kind, sha in protected_heads.items()):
+                    raise AgentError("Review rework modified a protected or already pushed repository")
+                if ci_checkout is not None:
+                    files = run_git(["diff", "--name-only", ci_checkout.baseline], cwd=ci_checkout.worktree).splitlines()
+                    if any(f == ".gitlab-ci.yml" or f.startswith((".gitlab/", "scripts/ci")) for f in files):
+                        raise GitLabError("CI repair modified pipeline gates; independent review required")
+                try:
+                    self._review_fix(fixed, checkouts, verdicts, agent)
+                    return True
+                except AgentReviewRejected as rejection:
+                    if rework_state["attempts"] >= self.settings.max_bug_retries:
+                        raise AgentError("Independent review rework attempt limit reached") from rejection
+                    if not self._claim_agent_run():
+                        raise AgentError("Review rework blocked: daily agent budget exhausted") from rejection
+                    rework_state["attempts"] += 1
+                    attempt = rework_state["attempts"]
+                    fixing_agent = verdicts[fixed[0].bug_id].get("ai_agent", agent)
+                    path = self.settings.logs_dir / f"batch-{bug_ids[0]}-{bug_ids[-1]}-rework-{attempt}"
+                    heads = {kind: head_commit(checkout.worktree) for kind, checkout in checkouts.items()}
+                    self.state.record_run_events(bug_ids, "review_rework_start", f"{fixing_agent} {attempt}")
+                    feedback = dict(rejection.review)
+                    feedback["read_only_repositories"] = list(protected_heads)
+                    revised = run_agent_batch_fix(
+                        fixing_agent, self.settings.agent_bin(fixing_agent), self.settings.zentao_client_script,
+                        checkouts["app"].worktree,
+                        checkouts["backend"].worktree if "backend" in checkouts else None,
+                        [(run.bug_id, run.title) for run in fixed], path.with_suffix(".json"), path.with_suffix(".log"),
+                        timeout_seconds=self.settings.codex_timeout_seconds,
+                        allow_full_xcodebuild=allow_full_xcodebuild, skip_backend=skip_backend,
+                        ci_context="只允许修改当前 MR 仓库，不得修改其他仓库或 CI 门闸。" if ci_checkout is not None else "",
+                        review_context=json.dumps(feedback, ensure_ascii=False),
+                    )
+                    if any(revised[bug_id]["decision"] != "fixed" for bug_id in bug_ids):
+                        raise TriageResultError("Review rework did not produce a verified fix for every bug")
+                    if project is not None and any(
+                        project.skips_platforms(_verdict_platforms(revised[bug_id])) for bug_id in bug_ids
+                    ):
+                        raise AgentError("Review rework changed the verdict to a skipped platform")
+                    if any(head_commit(checkouts[kind].worktree) != sha or has_changes(checkouts[kind].worktree)
+                           for kind, sha in protected_heads.items()):
+                        raise AgentError("Review rework modified a protected or already pushed repository")
+                    modified = [checkout for kind, checkout in checkouts.items()
+                                if has_changes(checkout.worktree) or head_commit(checkout.worktree) != heads[kind]]
+                    if not modified:
+                        raise AgentError("Review rework produced no code changes")
+                    for bug_id in bug_ids:
+                        previous_models = verdicts[bug_id].get("ai_models", [])
+                        current_models = revised[bug_id].get("ai_models", [])
+                        revised[bug_id]["ai_models"] = (list(dict.fromkeys(previous_models + current_models))
+                                                         if previous_models and current_models else [])
+                        revised[bug_id].pop("independent_review", None)
+                    verdicts.update(revised)
+                    for bug_id in bug_ids:
+                        self.state.set_triage_targets(bug_id, ",".join(revised[bug_id].get("targets", [])))
+                    for checkout in modified:
+                        commit_all(checkout.worktree, _commit_message(fixed, verdicts),
+                                   self.settings.git_author_name, self.settings.git_author_email,
+                                   amend=not has_changes(checkout.worktree))
+                    changed[:] = [checkout for checkout in checkouts.values() if checkout.has_work()]
+                    if ci_checkout is None and not self._rebase_changed_checkouts(
+                        fixed, [checkout for checkout in changed if checkout.kind not in protected_heads],
+                        checkouts, verdicts, label, fixing_agent, allow_full_xcodebuild,
+                    ):
+                        return False
+                    self.state.record_run_events(bug_ids, "review_rework_done", str(attempt))
+        except Exception:
+            for checkout in checkouts.values():
+                self._save_conflict_patch(checkout, label)
+            raise
+
     def _rebase_changed_checkouts(
         self,
         fixed: List[RunRecord],
@@ -924,6 +1088,7 @@ class Worker:
         allow_full_xcodebuild: bool,
     ) -> bool:
         bug_ids = [run.bug_id for run in fixed]
+        agent = verdicts[fixed[0].bug_id].get("ai_agent", agent)
         for checkout in changed:
             while True:
                 old_baseline = checkout.baseline
@@ -1018,6 +1183,11 @@ class Worker:
                             )
                             return False
                         continue
+                    for bug_id, verdict in conflict_verdicts.items():
+                        previous_models = verdicts[bug_id].get("ai_models", [])
+                        current_models = verdict.get("ai_models", [])
+                        verdict["ai_models"] = (list(dict.fromkeys(previous_models + current_models))
+                                                if previous_models and current_models else [])
                     verdicts.update(conflict_verdicts)
                     for run in fixed:
                         self.state.set_triage_targets(
@@ -1211,6 +1381,10 @@ class Worker:
                 allow_full_xcodebuild=project.allow_full_xcodebuild, ci_context=failure,
             )
             verdict = verdicts[run.bug_id]
+            previous_models = payload.get("verdict", {}).get("ai_models", [])
+            current_models = verdict.get("ai_models", [])
+            verdict["ai_models"] = (list(dict.fromkeys(previous_models + current_models))
+                                    if previous_models and current_models else [])
             if verdict["decision"] != "fixed" or not checkout.has_work():
                 raise GitLabError("Agent did not produce a verified CI repair")
             if any(other.has_work() for other in checkouts.values() if other is not checkout):
@@ -1223,8 +1397,13 @@ class Worker:
                        self.settings.git_author_name, self.settings.git_author_email,
                        amend=not has_changes(checkout.worktree))
             with self._lock_for_repo(checkout.repo_url):
+                self._review_and_rework(
+                    [run], checkouts, verdicts, project.agent, project.allow_full_xcodebuild,
+                    ci_checkout=checkout,
+                )
                 push_head_to_branch(checkout.worktree, item["source"])
             item["sha"] = head_commit(checkout.worktree)
+            verdict = verdicts[run.bug_id]
             payload["verdict"] = verdict
             payload["ci_wait_started"] = time.time()
             commits = dict(value.split(":", 1) for value in payload["commit_summary"].split())
@@ -1388,6 +1567,9 @@ def _solution_text(verdict: Dict[str, Any], commit_summary: str) -> str:
         parts.append(f"测试：{verdict['verification_command']}")
     parts.append(f"提交：{commit_summary}")
     parts.append(verdict.get("ai_info") or "AI / 模型：未确认（无运行时记录）")
+    review = verdict.get("independent_review")
+    if review:
+        parts.append(f"独立审查：{review['ai_info']}；{review['summary']}")
     return "\n".join(parts)
 
 

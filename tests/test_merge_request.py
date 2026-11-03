@@ -53,6 +53,7 @@ class MergeRequestTests(unittest.TestCase):
                                        git_author_name='Auto Fixer', git_author_email='fixer@example.com'), Mock())
         worker._project_for = Mock(return_value=_load({}))
         worker._rebase_changed_checkouts = Mock(return_value=True)
+        worker._review_fix = Mock()
         worker._record_progress = Mock()
         app = _Checkout('app', 'app', Path('/cache'), Path('/app'), 'dev', 'base')
         backend = _Checkout('backend', 'api', Path('/cache'), Path('/api'), 'pre_release', 'base', 'merge_request')
@@ -93,6 +94,7 @@ class MergeRequestTests(unittest.TestCase):
                                        git_author_name='Auto Fixer', git_author_email='fixer@example.com'), Mock())
         worker._project_for = Mock(return_value=_load({}))
         worker._rebase_changed_checkouts = Mock(return_value=True)
+        worker._review_fix = Mock()
         worker._record_progress = Mock()
         backend = _Checkout('backend', 'git@host:circll/circllo.git',
                             Path('/cache'), Path('/backend'), 'dev', 'base')
@@ -130,6 +132,7 @@ class MergeRequestTests(unittest.TestCase):
                     zentao_client_script=Path('/helper'), agent_bin=lambda agent: agent,
                     git_author_name='Auto Fixer', git_author_email='fixer@example.com'), Mock())
                 worker._claim_agent_budget = Mock(return_value=True)
+                worker._review_fix = Mock()
                 worker._project_for = Mock(return_value=_load({}))
                 worker._prepare_checkout = Mock(return_value=_Checkout(
                     'app', str(remote), root / 'cache', repo, 'dev', baseline))

@@ -59,6 +59,9 @@ def main() -> int:
         agents = sorted({project.agent for project in settings.load_projects() if project.enabled})
         if not agents:
             agents = sorted({project.agent for project in settings.load_projects()})
+        # Every fixer also needs the other CLI for independent review.
+        if agents:
+            agents = list(SUPPORTED_AGENTS)
     unknown = [agent for agent in agents if agent not in SUPPORTED_AGENTS]
     if unknown:
         print(f"Unknown agent(s): {', '.join(unknown)}; supported: {', '.join(SUPPORTED_AGENTS)}")
