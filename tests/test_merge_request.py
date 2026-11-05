@@ -3,12 +3,14 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from tests.test_git_ops import _clone_pair, _git, _git_output
 from tests.test_platform_skip import _load
+from tests.test_state import _bug, _project
 from zentao_auto_fixer.git_ops import GitError, head_commit, push_merge_request
 from zentao_auto_fixer.models import TERMINAL_STATUSES
+from zentao_auto_fixer.state import StateStore
 from zentao_auto_fixer.worker import Worker, _Checkout, _looks_like_non_fast_forward
 
 
@@ -53,7 +55,6 @@ class MergeRequestTests(unittest.TestCase):
                                        git_author_name='Auto Fixer', git_author_email='fixer@example.com'), Mock())
         worker._project_for = Mock(return_value=_load({}))
         worker._rebase_changed_checkouts = Mock(return_value=True)
-        worker._review_fix = Mock()
         worker._record_progress = Mock()
         app = _Checkout('app', 'app', Path('/cache'), Path('/app'), 'dev', 'base')
         backend = _Checkout('backend', 'api', Path('/cache'), Path('/api'), 'pre_release', 'base', 'merge_request')
@@ -94,7 +95,6 @@ class MergeRequestTests(unittest.TestCase):
                                        git_author_name='Auto Fixer', git_author_email='fixer@example.com'), Mock())
         worker._project_for = Mock(return_value=_load({}))
         worker._rebase_changed_checkouts = Mock(return_value=True)
-        worker._review_fix = Mock()
         worker._record_progress = Mock()
         backend = _Checkout('backend', 'git@host:circll/circllo.git',
                             Path('/cache'), Path('/backend'), 'dev', 'base')
@@ -133,7 +133,6 @@ class MergeRequestTests(unittest.TestCase):
                     git_author_name='Auto Fixer', git_author_email='fixer@example.com'), Mock())
                 worker._claim_agent_budget = Mock(return_value=True)
                 worker._still_actionable_before_writeback = Mock(return_value=True)
-                worker._review_fix = Mock()
                 worker._project_for = Mock(return_value=_load({}))
                 worker._prepare_checkout = Mock(return_value=_Checkout(
                     'app', str(remote), root / 'cache', repo, 'dev', baseline))
@@ -162,6 +161,134 @@ class MergeRequestTests(unittest.TestCase):
                 self.assertEqual(_git_output(remote, 'rev-parse', 'dev^'), baseline)
                 self.assertEqual(_git_output(remote, 'show', 'dev:fix.txt'), 'verified fix')
                 self.assertEqual(item['sha'], head_commit(repo))
+
+class MultiRepositoryPushRetryTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.state = StateStore(self.root / 'state.sqlite3')
+        self.state.enqueue_first_run(_bug(42), _project())
+        self.state.update_status(42, 'running')
+        self.worker = Worker(SimpleNamespace(
+            worker_count=1, data_dir=self.root, zentao_client_script=Path('/unused'),
+            git_author_name='Auto Fixer', git_author_email='fixer@example.com',
+        ), self.state)
+        self.worker._project_for = Mock(return_value=_project())
+        self.worker._still_actionable_before_writeback = Mock(return_value=True)
+        self.refresh = self.worker._rebase_changed_checkouts = Mock(return_value=True)
+        self.writeback = self.worker._comment_and_resolve = Mock(wraps=self.worker._comment_and_resolve)
+        self.app = _Checkout('app', 'app', self.root / 'app-cache', self.root / 'app',
+                             'dev', 'app-base')
+        self.backend = _Checkout('backend', 'backend', self.root / 'api-cache', self.root / 'api',
+                                 'pre_release', 'backend-base')
+        self.checkouts = {'app': self.app, 'backend': self.backend}
+        self.heads = {self.app.worktree: 'app-fix', self.backend.worktree: 'backend-fix'}
+        self.dirty = {path: True for path in self.heads}
+        self.patch_text = 'retained backend fix\n'
+
+        def commit(repo, *args, **kwargs):
+            self.dirty[repo] = False
+            return self.heads[repo]
+
+        replacements = {
+            'has_changes': Mock(side_effect=lambda repo: self.dirty[repo]),
+            'head_commit': Mock(side_effect=lambda repo: self.heads[repo]),
+            'changed_files': Mock(return_value=['fix.py']),
+            'commit_all': Mock(side_effect=commit),
+            'push_head_dry_run': Mock(),
+            'push_head_to_branch': Mock(side_effect=[None, GitError('non-fast-forward'), None]),
+            'run_git': Mock(return_value=''),
+            'export_patch': Mock(return_value=self.patch_text),
+            'comment_bug': Mock(), 'resolve_bug': Mock(), 'run_agent_batch_fix': Mock(),
+        }
+        for name, mocked in replacements.items():
+            replacement = patch('zentao_auto_fixer.worker.' + name, mocked)
+            replacement.start()
+            self.addCleanup(replacement.stop)
+            setattr(self, name, mocked)
+
+    def deliver(self):
+        self.worker._commit_push_and_resolve(
+            [self.state.get_run(42)], self.checkouts,
+            {42: {'solution': '修复多仓库问题', 'targets': ['app', 'backend']}},
+            '#42', 'claude', False,
+        )
+
+    def assert_partial_delivery_stops(self, reason):
+        self.deliver()
+
+        run = self.state.get_run(42)
+        self.assertEqual(run.status, 'retry_exhausted')
+        self.assertIn('部分仓库 app 已推送', run.error)
+        self.assertIn(reason, run.error)
+        self.assertEqual(self.push_head_to_branch.call_args_list, [
+            call(self.app.worktree, self.app.target_branch),
+            call(self.backend.worktree, self.backend.target_branch),
+        ])
+        self.assertEqual(self.refresh.call_count, 2)
+        self.assertEqual(self.refresh.call_args.args[1], [self.backend])
+        self.export_patch.assert_called_once_with(self.backend.worktree, self.backend.baseline)
+        patches = list((self.root / 'patches').glob('*.patch'))
+        self.assertEqual(len(patches), 1)
+        self.assertEqual(patches[0].read_text(), self.patch_text)
+        self.assertIn(str(patches[0]), run.error)
+        self.writeback.assert_not_called()
+        self.comment_bug.assert_not_called()
+        self.resolve_bug.assert_not_called()
+        self.run_agent_batch_fix.assert_not_called()
+
+    def test_partial_delivery_stops_and_saves_patch_when_nff_refresh_returns_false(self):
+        self.refresh.side_effect = [True, False]
+        self.assert_partial_delivery_stops('Remote refresh could not finish')
+
+    def test_partial_delivery_stops_and_saves_patch_when_nff_refresh_raises(self):
+        self.refresh.side_effect = [True, GitError('fetch failed during refresh')]
+        self.assert_partial_delivery_stops('fetch failed during refresh')
+
+    def test_refresh_cannot_change_the_head_of_an_already_pushed_repository(self):
+        def refresh(*args, **kwargs):
+            if self.refresh.call_count == 2:
+                self.heads[self.app.worktree] = 'unexpected-app-head'
+            return True
+
+        self.refresh.side_effect = refresh
+        self.assert_partial_delivery_stops('modified an already pushed repository')
+
+    def test_refresh_cannot_dirty_an_already_pushed_repository(self):
+        def refresh(*args, **kwargs):
+            if self.refresh.call_count == 2:
+                self.dirty[self.app.worktree] = True
+            return True
+
+        self.refresh.side_effect = refresh
+        self.assert_partial_delivery_stops('modified an already pushed repository')
+
+    def test_successful_nff_refresh_retries_only_the_undelivered_repository(self):
+        def refresh(*args, **kwargs):
+            if self.refresh.call_count == 2:
+                self.heads[self.backend.worktree] = 'backend-refreshed'
+            return True
+
+        self.refresh.side_effect = refresh
+        self.deliver()
+
+        self.assertEqual(self.push_head_to_branch.call_args_list, [
+            call(self.app.worktree, self.app.target_branch),
+            call(self.backend.worktree, self.backend.target_branch),
+            call(self.backend.worktree, self.backend.target_branch),
+        ])
+        self.assertEqual(self.refresh.call_count, 2)
+        self.assertEqual(self.refresh.call_args.args[1], [self.backend])
+        self.writeback.assert_called_once()
+        run = self.state.get_run(42)
+        self.assertEqual(run.status, 'pushed')
+        self.assertEqual(run.commit_hash, 'app:app-fix backend:backend-refreshed')
+        self.comment_bug.assert_called_once()
+        self.resolve_bug.assert_called_once()
+        self.export_patch.assert_not_called()
+        self.run_agent_batch_fix.assert_not_called()
+
 
 class AutoMergeLifecycleTests(unittest.TestCase):
     def setUp(self):

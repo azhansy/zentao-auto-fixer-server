@@ -56,12 +56,10 @@ def main() -> int:
     if len(sys.argv) == 2:
         agents = [sys.argv[1].strip().lower()]
     else:
-        agents = sorted({project.agent for project in settings.load_projects() if project.enabled})
-        if not agents:
-            agents = sorted({project.agent for project in settings.load_projects()})
-        # Every fixer also needs the other CLI for independent review.
-        if agents:
-            agents = list(SUPPORTED_AGENTS)
+        projects = settings.load_projects()
+        projects = [project for project in projects if project.enabled] or projects
+        agents = sorted({agent for project in projects
+                         for agent in (project.agent, project.fallback_agent) if agent})
     unknown = [agent for agent in agents if agent not in SUPPORTED_AGENTS]
     if unknown:
         print(f"Unknown agent(s): {', '.join(unknown)}; supported: {', '.join(SUPPORTED_AGENTS)}")

@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -50,7 +51,6 @@ class MergeRequestRepairTests(unittest.TestCase):
         self.worker._project_for = Mock(return_value=_project())
         self.worker._claim_agent_budget = Mock(return_value=True)
         self.worker._still_actionable_before_writeback = Mock(return_value=True)
-        self.worker._review_fix = Mock()
         self.worker._prepare_checkout = Mock(return_value=_Checkout(
             'app', str(self.remote), self.remote, self.repo, self.source, self.source_sha))
         self.client = SimpleNamespace(inspect=Mock(return_value=({'state': 'opened'}, [])))
@@ -79,12 +79,43 @@ class MergeRequestRepairTests(unittest.TestCase):
         for ancestor in (self.source_sha, self.target_sha):
             _git(self.remote, 'merge-base', '--is-ancestor', ancestor, merged)
         self.assertEqual((self.repo / '.gitlab-ci.yml').read_text(), 'trusted target gate\n')
-        self.worker._review_fix.assert_called_once()
+        self.run_agent_batch_fix.assert_called_once()
         self.assertEqual(self.item['sha'], merged)
         saved = json.loads(self.state.get_run(9240).writeback_payload)
         self.assertEqual(saved['merge_requests'][0]['url'], self.item['url'])
         self.assertEqual(saved['ci_attempts'], 1)
         self.assertIn(self.item['url'], self.add_comment.call_args.args[2])
+
+    def test_claude_only_repair_commits_and_pushes_when_codex_is_unavailable(self):
+        self.worker._project_for.return_value = replace(_project(), agent='claude', fallback_agent='')
+
+        def configured_binary(agent):
+            if agent != 'claude':
+                raise FileNotFoundError('Codex is unavailable')
+            return '/configured/claude'
+
+        self.worker.settings.agent_bin = Mock(side_effect=configured_binary)
+        self.worker.settings.codex_bin = '/missing/codex'
+
+        self.repair()
+
+        self.worker.settings.agent_bin.assert_called_once_with('claude')
+        self.run_agent_batch_fix.assert_called_once()
+        self.assertEqual(self.run_agent_batch_fix.call_args.args[:2], ('claude', '/configured/claude'))
+        self.worker._claim_agent_budget.assert_called_once()
+        delivered = _git_output(self.remote, 'rev-parse', self.source)
+        self.assertNotEqual(delivered, self.source_sha)
+        self.assertEqual(delivered, head_commit(self.repo))
+        self.assertEqual(_git_output(self.remote, 'show', f'{self.source}:base.txt'),
+                         'target advance + source fix')
+        self.assertEqual(_git_output(self.remote, 'show', f'{self.source}:.gitlab-ci.yml'),
+                         'trusted target gate')
+        saved = json.loads(self.state.get_run(9240).writeback_payload)
+        self.assertEqual(saved['merge_requests'][0]['url'], self.item['url'])
+        self.assertEqual(saved['merge_requests'][0]['sha'], delivered)
+        self.assertEqual(saved['ci_attempts'], 1)
+        self.assertIn('通过 <zentao-bug-fixer>自动修复',
+                      _git_output(self.remote, 'log', self.source, '-1', '--format=%B'))
 
     def test_closed_or_merged_mr_is_not_pushed_or_recreated(self):
         self.client.inspect.return_value = ({'state': 'closed'}, [])
@@ -118,7 +149,8 @@ class MergeRequestRepairTests(unittest.TestCase):
         self.assertEqual(self.state.get_run(9240).status, 'skipped_stale')
         self.assertEqual(_git_output(self.remote, 'rev-parse', self.source), self.source_sha)
         self.assertTrue(list((self.root / 'patches').glob('*.patch')))
-        self.worker._review_fix.assert_not_called()
+        self.run_agent_batch_fix.assert_called_once()
+        self.client.inspect.assert_not_called()
 
     def test_new_untracked_pipeline_gate_is_rejected(self):
         def unsafe(*args, **kwargs):
@@ -130,4 +162,20 @@ class MergeRequestRepairTests(unittest.TestCase):
         with self.assertRaisesRegex(GitLabError, 'pipeline gates'):
             self.repair()
         self.assertEqual(_git_output(self.remote, 'rev-parse', self.source), self.source_sha)
-        self.worker._review_fix.assert_not_called()
+        self.run_agent_batch_fix.assert_called_once()
+        self.client.inspect.assert_not_called()
+
+    def test_modifying_a_trusted_pipeline_gate_is_rejected_without_push(self):
+        def unsafe(*args, **kwargs):
+            verdict = self.fix(*args, **kwargs)
+            (self.repo / '.gitlab-ci.yml').write_text('weakened gate\n')
+            return verdict
+
+        self.run_agent_batch_fix.side_effect = unsafe
+        with self.assertRaisesRegex(GitLabError, 'pipeline gates'):
+            self.repair()
+
+        self.assertEqual(_git_output(self.remote, 'rev-parse', self.source), self.source_sha)
+        self.assertEqual(_git_output(self.remote, 'show', 'dev:.gitlab-ci.yml'), 'trusted target gate')
+        self.run_agent_batch_fix.assert_called_once()
+        self.client.inspect.assert_not_called()

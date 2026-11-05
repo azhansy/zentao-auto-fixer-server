@@ -49,7 +49,6 @@ class MergeRequestLifecycleTests(unittest.TestCase):
         self.final_note = self.patched('comment_bug')
         self.resolve = self.patched('resolve_bug')
         self.agent = self.patched('run_agent_batch_fix')
-        self.reviewer = self.patched('run_agent_review')
         self.create_mr = self.patched('push_merge_request')
         self.gitlab = self.patched('GitLab')
         self.client = self.gitlab.return_value
@@ -213,7 +212,6 @@ class MergeRequestLifecycleTests(unittest.TestCase):
 
         self.worker._repair_merge_request.assert_not_called()
         self.agent.assert_not_called()
-        self.reviewer.assert_not_called()
         self.assertEqual(self.payload()['ci_attempts'], 0)
         self.resolve.assert_not_called()
 
@@ -238,7 +236,6 @@ class MergeRequestLifecycleTests(unittest.TestCase):
 
         self.worker._repair_merge_request.assert_not_called()
         self.agent.assert_not_called()
-        self.reviewer.assert_not_called()
         self.assertEqual(self.payload()['ci_attempts'], 0)
         self.resolve.assert_not_called()
 
@@ -277,7 +274,6 @@ class MergeRequestLifecycleTests(unittest.TestCase):
         self.worker._claim_agent_budget.assert_not_called()
         self.worker._claim_agent_run.assert_not_called()
         self.agent.assert_not_called()
-        self.reviewer.assert_not_called()
         self.add_note.assert_not_called()
 
     def test_all_merged_mrs_are_listed_in_the_final_success_note(self):
@@ -387,7 +383,6 @@ class MergeRequestLifecycleTests(unittest.TestCase):
         self.assertIn(latest_sha[:12], text)
         self.assertNotIn('已进入原 MR 续修流程', text)
         self.agent.assert_not_called()
-        self.reviewer.assert_not_called()
         self.final_note.assert_not_called()
         self.resolve.assert_not_called()
 
