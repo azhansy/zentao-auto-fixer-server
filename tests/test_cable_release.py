@@ -76,6 +76,7 @@ class CableReleaseTests(unittest.TestCase):
         state = Mock()
         worker = Worker(SimpleNamespace(data_dir=self.root, zentao_client_script=Path('/helper')), state)
         worker._project_for = Mock(return_value=SimpleNamespace(enabled=True, resolve_bug_after_fix=True))
+        worker._still_actionable_before_writeback = Mock(return_value=True)
         worker._record_progress = Mock()
         run = SimpleNamespace(bug_id=1, status='awaiting_release', error='等待 PRE 验收',
                               writeback_payload=json.dumps(self.payload), commit_hash='backend:fix')

@@ -12,10 +12,14 @@ def is_cable_release(item):
             and item['target'] == 'pre_release')
 
 
-def check_cable_release(client, item, payload, data_dir, bug_id, repair_failed=None):
+def check_cable_release(client, item, payload, data_dir, bug_id, repair_failed=None, repair_conflict=None):
     mr, jobs = client.inspect(item['sha'], 'pre_release')
     if mr.get('state') not in {'opened', 'merged'}:
         raise GitLabError('Cable 修复 MR 已关闭且未合并')
+    if (mr['state'] == 'opened' and repair_conflict is not None
+            and (mr.get('has_conflicts') or mr.get('detailed_merge_status') in {'conflict', 'need_rebase'})):
+        repair_conflict()
+        return False, 'MR 合并冲突尚未排除，等待续修与重新验证'
     pipeline = mr.get('head_pipeline') or {}
     if (mr['state'] == 'opened' and pipeline.get('sha') == item['sha']
             and pipeline.get('status') == 'failed' and repair_failed is not None

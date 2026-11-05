@@ -303,7 +303,7 @@ class FollowingNotesTests(unittest.TestCase):
             raise RuntimeError("boom")
 
         worker._process_bug = mock.Mock(side_effect=blow_up)
-        worker.queue.put(7)
+        worker.queue.put((0, 7))
         worker._queued_ids.add(7)
         with mock.patch("zentao_auto_fixer.worker.add_comment") as add:
             worker._run()

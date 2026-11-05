@@ -308,7 +308,7 @@ class WorkerReviewTests(unittest.TestCase):
     def test_ci_repair_blocks_unavailable_review_and_preserves_patch_after_cleanup(self):
         self.worker._project_for = Mock(return_value=_load({'agent': 'claude'}))
         self.worker._prepare_checkout = Mock(return_value=self.checkout)
-        item = {'kind': 'app', 'repo_url': str(self.remote), 'source': 'dev', 'sha': self.baseline,
+        item = {'kind': 'app', 'repo_url': str(self.remote), 'source': 'dev', 'target': 'dev', 'sha': self.baseline,
                 'url': 'https://gitlab.example/app/-/merge_requests/1'}
         payload = {'commit_summary': 'app:' + self.baseline}
         with patch('zentao_auto_fixer.worker.run_agent_batch_fix', side_effect=self._write_fix), \
@@ -413,9 +413,9 @@ class WorkerReviewTests(unittest.TestCase):
 
     def _exercise_ci_rework(self, reject_again):
         self.worker._prepare_checkout = Mock(return_value=self.checkout)
-        item = {'kind': 'app', 'repo_url': str(self.remote), 'source': 'dev', 'sha': self.baseline,
+        item = {'kind': 'app', 'repo_url': str(self.remote), 'source': 'dev', 'target': 'dev', 'sha': self.baseline,
                 'url': 'https://gitlab.example/app/-/merge_requests/1'}
-        payload = {'commit_summary': 'app:' + self.baseline}
+        payload = {'commit_summary': 'app:' + self.baseline, 'merge_requests': [item]}
 
         def fix(*args, **kwargs):
             return self._rework(*args, **kwargs) if kwargs.get('review_context') else self._write_fix()
@@ -423,6 +423,9 @@ class WorkerReviewTests(unittest.TestCase):
         review_results = (AgentReviewRejected(dict(REJECTED)) if reject_again
                           else [AgentReviewRejected(dict(REJECTED)), self._approved()])
         with patch('zentao_auto_fixer.worker.run_agent_batch_fix', side_effect=fix) as repair, \
+             patch('zentao_auto_fixer.worker.GitLab', return_value=SimpleNamespace(
+                 inspect=lambda *args: ({'state': 'opened'}, []))), \
+             patch('zentao_auto_fixer.worker.add_comment'), \
              patch('zentao_auto_fixer.worker.run_agent_review', side_effect=review_results) as review, \
              patch('zentao_auto_fixer.worker.push_head_to_branch', wraps=push_head_to_branch) as push:
             if reject_again:

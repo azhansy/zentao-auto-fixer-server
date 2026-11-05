@@ -132,11 +132,13 @@ ZENTAO_RESOLVED_BUILD=主干
       "resolveBugAfterFix": true,
       "app": {
         "repoUrl": "git@gitlab.example.com:group/product-a-app.git",
-        "targetBranch": "dev"
+        "targetBranch": "dev",
+        "deliveryMode": "merge_request"
       },
       "backend": {
         "repoUrl": "git@gitlab.example.com:group/product-a-api.git",
-        "targetBranch": "pre-release"
+        "targetBranch": "pre-release",
+        "deliveryMode": "push"
       },
       "onlyCodeBugs": true,
       "maxBugsPerPoll": 3
@@ -424,6 +426,16 @@ __pycache__/
 自动修复提交的正文末尾同样列出本次运行的 AI、模型和执行器，并以 `通过 <zentao-bug-fixer>自动修复` 收尾；提交标题保持原有格式。普通修复、批量修复和 CI 补修均使用该尾注；AI 自行提交的尚未推送 HEAD 也会补齐，不回改历史远端提交。
 
 ### GitLab MR 自动交付
+
+在 `projects.json` 中按仓库设置 `deliveryMode`：允许直接推送时填 `push`（默认）；目标分支受保护、需要提 MR 时填 `merge_request`。例如 `app.deliveryMode=merge_request` 会把客户端修复推到独立的 `feature/zentao-*` 分支，并创建以 `app.targetBranch` 为目标的 MR；`backend.deliveryMode` 独立配置。旧单仓库写法将 `deliveryMode` 放在项目顶层；使用 `app` 对象时，客户端的设置必须放在 `app` 内。
+
+提交 MR 后任务显示「已提 MR，待合并」，核验 CI 并合并完成后才回写修复成功。配置在后续任务启动时读取，不会改变正在执行的任务，也不会自动重跑已经重试耗尽的 Bug。
+
+确认创建 MR 后，服务立即在禅道备注列出每个仓库的 MR 链接、目标分支和提交，并明确「尚未完成交付」。同一状态的通知持久化去重；备注失败会在后续检查重试，不重新创建 MR，也不提前写入修复成功标记。
+
+现有轮询器持续登记待合并 MR，普通修复任务优先，worker 有空闲位置时检查 MR。CI 失败或明确的合并冲突会在原 MR/source 分支续修，重新测试和独立审查后普通推送；冲突通过合入目标分支解决，保留已发布历史，不强推、不另开 MR。续修次数沿用 `AUTO_FIXER_MAX_BUG_RETRIES`，模型调用计入现有每日预算，重启不清零。正在跑 CI、等待审批、暂时无法读取接口时不反复调用 AI；权限不足、CI 检查缺失、合并规则不满足、MR 被关闭或 head/target 被他人修改时，保留链接并说明阻断，不自动放宽门禁。禅道已被他人处理时停止续修和推送。全部 MR 正常合并并通过既有验收后，最终修复备注再次列出全部 MR，随后按 `resolveBugAfterFix` 决定是否标为已解决。
+
+提交前被阻断的已验证修复会保留补丁；包含 merge 的 `*-merge.patch` 保存相对原 feature 提交的完整树差异，使用 `git apply`，普通提交补丁继续使用 `git am`。应用前先执行 `git status --short` 和 `git rev-parse HEAD`，确认工作区干净且仍位于补丁对应的原 feature 提交；分支可能已被他人推进，不能直接覆盖后续改动。
 
 配置 `AUTO_FIXER_GITLAB_URL=https://gitlab.example.com` 与 `AUTO_FIXER_GITLAB_TOKEN_FILE`（服务账号可读取的私密文件，令牌需 API 权限以读取 CI、开启 MR Auto Merge，不纳入 Git）。
 `AUTO_FIXER_GITLAB_REQUIRED_JOBS` 默认 `lint,unit-test,build,integration`，必须匹配 CI job 名称；缺项、允许失败或跳过都不能交付。GitLab 项目必须开启“流水线成功才允许合并”。创建 MR 后由原有轮询器跟踪，API 错误、外部改动 MR head、失败次数耗尽等显示“MR 交付待处理”，保留 feature 分支供接手。

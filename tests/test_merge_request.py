@@ -132,14 +132,15 @@ class MergeRequestTests(unittest.TestCase):
                     zentao_client_script=Path('/helper'), agent_bin=lambda agent: agent,
                     git_author_name='Auto Fixer', git_author_email='fixer@example.com'), Mock())
                 worker._claim_agent_budget = Mock(return_value=True)
+                worker._still_actionable_before_writeback = Mock(return_value=True)
                 worker._review_fix = Mock()
                 worker._project_for = Mock(return_value=_load({}))
                 worker._prepare_checkout = Mock(return_value=_Checkout(
                     'app', str(remote), root / 'cache', repo, 'dev', baseline))
                 run = SimpleNamespace(bug_id=42, title='修复问题')
-                item = {'kind': 'app', 'repo_url': str(remote), 'source': 'dev',
+                item = {'kind': 'app', 'repo_url': str(remote), 'source': 'dev', 'target': 'dev',
                         'sha': baseline, 'url': 'https://gitlab.example/app/-/merge_requests/1'}
-                payload = {'commit_summary': f'app:{baseline}'}
+                payload = {'commit_summary': f'app:{baseline}', 'merge_requests': [item]}
                 info = 'AI / 模型：DeepSeek（deepseek-flash）；执行器：Claude Code'
 
                 def repair(*args, **kwargs):
@@ -150,6 +151,9 @@ class MergeRequestTests(unittest.TestCase):
                     return {42: {'decision': 'fixed', 'solution': '修复问题', 'ai_info': info}}
 
                 with patch('zentao_auto_fixer.worker.run_agent_batch_fix', side_effect=repair), \
+                     patch('zentao_auto_fixer.worker.GitLab', return_value=SimpleNamespace(
+                         inspect=lambda *args: ({'state': 'opened'}, []))), \
+                     patch('zentao_auto_fixer.worker.add_comment'), \
                      patch('zentao_auto_fixer.worker.remove_worktree'):
                     worker._repair_merge_request(run, payload, item, 'test failed')
 
@@ -172,13 +176,16 @@ class AutoMergeLifecycleTests(unittest.TestCase):
         self.run = SimpleNamespace(bug_id=1, status='awaiting_merge', error='', commit_hash='backend:abc', writeback_payload=json.dumps(self.payload))
         self.worker = Worker(SimpleNamespace(worker_count=3, max_bug_retries=2, git_timeout_seconds=30), Mock())
         self.worker._project_for = Mock(return_value=SimpleNamespace(enabled=True))
+        self.worker._still_actionable_before_writeback = Mock(return_value=True)
+        self.worker._note_merge_requests = Mock()
         self.worker._writeback_one = Mock()
         self.worker._record_progress = Mock()
 
     def test_only_complete_required_jobs_on_merged_head_can_resolve(self):
         with patch('zentao_auto_fixer.worker.GitLab') as cls:
             cls.return_value.source_branch_exists.return_value = False
-            cls.return_value.inspect.return_value = ({'state': 'merged', 'head_pipeline': {'status': 'success'}}, self.jobs)
+            cls.return_value.inspect.return_value = ({'state': 'merged', 'merge_commit_sha': 'merge',
+                                                     'head_pipeline': {'status': 'success'}}, self.jobs)
             self.worker._check_merge_requests(self.run)
             payload = self.worker._writeback_one.call_args.args[1]
             self.assertNotIn('delivery_status', payload)

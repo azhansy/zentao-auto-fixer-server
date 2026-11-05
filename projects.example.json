@@ -13,12 +13,14 @@
       "skipBackendBugs": false,
       "resolveBugAfterFix": true,
       "app": {
-        "repoUrl": "git@github.com:group/product-a-app.git",
-        "targetBranch": "dev"
+        "repoUrl": "git@gitlab.example.com:group/product-a-app.git",
+        "targetBranch": "dev",
+        "deliveryMode": "merge_request"
       },
       "backend": {
-        "repoUrl": "git@github.com:group/product-a-api.git",
-        "targetBranch": "dev"
+        "repoUrl": "git@gitlab.example.com:group/product-a-api.git",
+        "targetBranch": "dev",
+        "deliveryMode": "push"
       },
       "onlyCodeBugs": true,
       "maxBugsPerPoll": 3
@@ -34,6 +36,7 @@
       "resolveBugAfterFix": true,
       "repoUrl": "git@github.com:group/product-b.git",
       "targetBranch": "main",
+      "deliveryMode": "push",
       "onlyCodeBugs": true,
       "maxBugsPerPoll": 2
     }

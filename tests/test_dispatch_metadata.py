@@ -28,7 +28,7 @@ class DispatchAndMetadataTests(unittest.TestCase):
 
         def record_dispatch():
             bug_id = take()
-            dispatched.append(bug_id)
+            dispatched.append(bug_id[1])
             return bug_id
 
         worker.queue.get_nowait = record_dispatch
@@ -65,9 +65,9 @@ class DispatchAndMetadataTests(unittest.TestCase):
         worker = Worker(SimpleNamespace(worker_count=3), mock.Mock())
         for bug_id in [30, 20, 10, 20]:
             worker.enqueue(bug_id)
-        self.assertEqual(worker.queue.get_nowait(), 10)
+        self.assertEqual(worker.queue.get_nowait(), (0, 10))
         worker.enqueue(5)
-        self.assertEqual([worker.queue.get_nowait() for _ in range(3)], [5, 20, 30])
+        self.assertEqual([worker.queue.get_nowait()[1] for _ in range(3)], [5, 20, 30])
 
     def test_restart_order_ignores_first_seen_time_and_does_not_batch_larger_ids(self):
         import tempfile

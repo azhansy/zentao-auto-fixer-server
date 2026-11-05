@@ -30,6 +30,7 @@ def run_git(
     cwd: Optional[Path] = None,
     env: Optional[Dict[str, str]] = None,
     timeout: Optional[int] = None,
+    strip_output: bool = True,
 ) -> str:
     cmd = ["git"] + args
     try:
@@ -47,7 +48,7 @@ def run_git(
         raise GitError(f"{' '.join(cmd)} timed out after {timeout}s") from exc
     if result.returncode != 0:
         raise GitError(f"{' '.join(cmd)} failed with exit {result.returncode}:\n{result.stdout}")
-    return result.stdout.strip()
+    return result.stdout.strip() if strip_output else result.stdout
 
 
 def ensure_repo_cache(
@@ -154,6 +155,57 @@ def rebase_onto_latest_remote(
     except GitError as exc:
         raise RebaseConflictError(str(exc), latest) from exc
     return latest
+
+
+def merge_target_into_branch(
+    repo: Path,
+    source_branch: str,
+    target_branch: str,
+    *,
+    timeout: Optional[int] = None,
+    env: Optional[Dict[str, str]] = None,
+) -> str:
+    """Keep the published MR source history while preparing a target merge for repair."""
+    if run_git(["status", "--porcelain"], cwd=repo, timeout=timeout):
+        raise GitError("MR source worktree must be clean before merging its target")
+    fetch_args = ["fetch", "--no-tags"]
+    if run_git(["rev-parse", "--is-shallow-repository"], cwd=repo, timeout=timeout) == "true":
+        fetch_args.append("--unshallow")
+    fetch_args.extend([
+        "origin",
+        f"+refs/heads/{source_branch}:refs/remotes/origin/{source_branch}",
+        f"+refs/heads/{target_branch}:refs/remotes/origin/{target_branch}",
+    ])
+    run_git(fetch_args, cwd=repo, timeout=timeout)
+    source = run_git(["rev-parse", f"refs/remotes/origin/{source_branch}"], cwd=repo, timeout=timeout)
+    if head_commit(repo) != source:
+        raise GitError("MR source branch changed outside this task")
+    target = run_git(["rev-parse", f"refs/remotes/origin/{target_branch}"], cwd=repo, timeout=timeout)
+    ignored = set(run_git(["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+                          cwd=repo, timeout=timeout).split("\0")) - {""}
+    if ignored:
+        ignore_case = run_git(["config", "--bool", "--default", "false", "--get", "core.ignorecase"],
+                              cwd=repo, timeout=timeout) == "true"
+        ignored = {path.casefold() if ignore_case else path for path in ignored}
+        protected = ignored | {str(parent) for path in ignored for parent in Path(path).parents}
+        target_paths = run_git(["diff", "--name-only", "--diff-filter=ACMRT", "-z", f"{source}...{target}"],
+                               cwd=repo, timeout=timeout).split("\0")
+        for path in target_paths:
+            path = path.casefold() if ignore_case else path
+            if path and (path in protected or any(str(parent) in ignored for parent in Path(path).parents)):
+                raise GitError(f"Target merge would overwrite ignored local data: {path}")
+    merge_env = os.environ.copy()
+    merge_env.update(env or {})
+    for field in ("NAME", "EMAIL"):
+        if merge_env.get(f"GIT_AUTHOR_{field}"):
+            merge_env.setdefault(f"GIT_COMMITTER_{field}", merge_env[f"GIT_AUTHOR_{field}"])
+    try:
+        run_git(["merge", "--no-ff", "--no-commit", "--no-overwrite-ignore", target],
+                cwd=repo, env=merge_env, timeout=timeout)
+    except GitError:
+        if not run_git(["diff", "--name-only", "--diff-filter=U"], cwd=repo, timeout=timeout):
+            raise
+    return target
 
 
 def continue_rebase(repo: Path, *, timeout: Optional[int] = None) -> None:

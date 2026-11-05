@@ -59,7 +59,7 @@ class Poller:
         # ponytail: dispatch pauses during polling; publish a collected snapshot if polling latency grows.
         with self.worker.dispatch_lock:
             for bug_id in self.state.awaiting_merge_bug_ids():
-                self.worker.enqueue(bug_id)
+                self.worker.enqueue(bug_id, idle=True)
             for project in projects:
                 self._poll_project(project)
 
