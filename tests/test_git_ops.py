@@ -5,6 +5,8 @@ from pathlib import Path
 
 from zentao_auto_fixer.git_ops import (
     RebaseConflictError,
+    GitError,
+    assert_no_pipeline_changes,
     commit_all,
     continue_rebase,
     export_patch,
@@ -64,6 +66,32 @@ class ExportPatchTests(unittest.TestCase):
             self.assertIn("Subject: [PATCH] fix", patch)
             self.assertIn("-before", patch)
             self.assertIn("+after", patch)
+
+
+class PipelineGuardTests(unittest.TestCase):
+    def test_blocks_pending_and_agent_committed_ci_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _remote, _seed, worker = _clone_pair(Path(tmp))
+            baseline = head_commit(worker)
+            (worker / 'fix.txt').write_text('business fix')
+            assert_no_pipeline_changes(worker, baseline)
+            for path in ('.gitlab-ci.yml', '.github/workflows/test.yml', 'scripts/ci-check.sh'):
+                with self.subTest(path=path):
+                    file = worker / path
+                    file.parent.mkdir(parents=True, exist_ok=True)
+                    file.write_text('changed CI')
+                    with self.assertRaises(GitError):
+                        assert_no_pipeline_changes(worker, baseline)
+                    _git(worker, 'add', '-A')
+                    with self.assertRaises(GitError):
+                        assert_no_pipeline_changes(worker, baseline)
+                    _git(worker, 'commit', '-qm', 'agent commit')
+                    with self.assertRaises(GitError):
+                        assert_no_pipeline_changes(worker, baseline)
+                    _git(worker, 'mv', path, 'renamed-ci.txt')
+                    with self.assertRaises(GitError):
+                        assert_no_pipeline_changes(worker, head_commit(worker))
+                    _git(worker, 'reset', '--hard', baseline)
 
 
 class CommitAllTests(unittest.TestCase):

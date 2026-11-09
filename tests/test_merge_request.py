@@ -62,6 +62,7 @@ class MergeRequestTests(unittest.TestCase):
         url = 'https://gitlab.example/im/cable/-/merge_requests/42'
         with patch('zentao_auto_fixer.worker.has_changes', return_value=False), \
              patch('zentao_auto_fixer.worker.head_commit', return_value='abcdef1234567890'), \
+             patch('zentao_auto_fixer.worker.assert_no_pipeline_changes'), \
              patch('zentao_auto_fixer.worker.changed_files', return_value=[]), \
              patch('zentao_auto_fixer.worker.commit_all', return_value='abcdef1234567890') as commit, \
              patch('zentao_auto_fixer.worker.push_head_dry_run') as dry, \
@@ -101,6 +102,7 @@ class MergeRequestTests(unittest.TestCase):
         run = SimpleNamespace(bug_id=42, title='组局修复', commit_hash='')
         with patch('zentao_auto_fixer.worker.has_changes', return_value=False), \
              patch('zentao_auto_fixer.worker.head_commit', return_value='fix'), \
+             patch('zentao_auto_fixer.worker.assert_no_pipeline_changes'), \
              patch('zentao_auto_fixer.worker.changed_files', return_value=[]), \
              patch('zentao_auto_fixer.worker.commit_all', return_value='fix'), \
              patch('zentao_auto_fixer.worker.push_head_dry_run'), \
@@ -192,6 +194,7 @@ class MultiRepositoryPushRetryTests(unittest.TestCase):
             return self.heads[repo]
 
         replacements = {
+            'assert_no_pipeline_changes': Mock(),
             'has_changes': Mock(side_effect=lambda repo: self.dirty[repo]),
             'head_commit': Mock(side_effect=lambda repo: self.heads[repo]),
             'changed_files': Mock(return_value=['fix.py']),

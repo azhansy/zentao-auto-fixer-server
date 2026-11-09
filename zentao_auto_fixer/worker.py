@@ -24,6 +24,8 @@ from .git_ops import (
     GitError,
     RebaseConflictError,
     abort_rebase,
+    assert_no_pipeline_changes,
+    is_pipeline_file as _is_pipeline_file,
     changed_files,
     commit_all,
     continue_rebase,
@@ -822,6 +824,8 @@ class Worker:
             LOGGER.info("Worker skipped batch %s: every bug was handled in ZenTao while the agent ran", batch_label)
             return
 
+        for checkout in changed:
+            assert_no_pipeline_changes(checkout.worktree, checkout.baseline)
         commit_message = _commit_message(fixed, verdicts)
         for checkout in changed:
             self.state.record_run_events(bug_ids, f"commit_start_{checkout.kind}", commit_message)
@@ -871,6 +875,7 @@ class Worker:
             checkout = next(checkout for checkout in changed if checkout.kind not in pushed)
             while True:
                 try:
+                    assert_no_pipeline_changes(checkout.worktree, checkout.baseline)
                     commit_message = _commit_message(fixed, verdicts)
                     self.state.record_run_events(bug_ids, f"push_start_{checkout.kind}", checkout.target_branch)
                     if checkout.delivery_mode == "merge_request":
@@ -1289,7 +1294,9 @@ class Worker:
             if any(_is_pipeline_file(path) for path in run_git(
                     ["diff", "--name-only", "--diff-filter=U"], cwd=checkout.worktree).splitlines()):
                 raise GitLabError("MR conflict affects pipeline gates; manual handling required")
-            gate_args = ["diff", checkout.baseline, "--", ".gitlab-ci.yml", ".gitlab", "scripts/ci*"]
+            gate_args = ["diff", checkout.baseline, "--", ".gitlab-ci.yml", ".gitlab-ci.yaml",
+                         ".gitlab", ".github/workflows", ".circleci", "Jenkinsfile",
+                         "azure-pipelines.yml", "scripts/ci*"]
             gates_before = run_git(gate_args, cwd=checkout.worktree)
             if "app" not in checkouts:
                 checkouts["app"] = self._prepare_checkout([run.bug_id], "app", project.repo_url, project.target_branch, label)
@@ -1323,11 +1330,11 @@ class Worker:
                 raise GitLabError("Agent did not produce a verified CI repair")
             if any(other.has_work() for other in checkouts.values() if other is not checkout):
                 raise GitLabError("CI repair changed a repository outside this MR")
-            # The repair agent cannot turn a red pipeline green by changing the gate itself.
-            untracked = run_git(["ls-files", "--others", "--exclude-standard"], cwd=checkout.worktree).splitlines()
+            untracked = run_git(["ls-files", "--others", "--exclude-standard", "-z"],
+                                cwd=checkout.worktree, strip_output=False).split("\0")
             if (run_git(gate_args, cwd=checkout.worktree) != gates_before
                     or any(_is_pipeline_file(path) for path in untracked)):
-                raise GitLabError("CI repair modified pipeline gates; manual handling required")
+                raise GitLabError("CI repair modified pipeline gates; 自动修复禁止修改 CI 文件，需人工处理")
             commit_all(checkout.worktree, _commit_message([run], verdicts),
                        self.settings.git_author_name, self.settings.git_author_email,
                        amend=not has_changes(checkout.worktree))
@@ -1486,10 +1493,6 @@ def _merge_request_details(requests) -> str:
         f"{item.get('kind', '仓库')}：{item['url']}（目标：{item['target']}，提交：{item['sha'][:12]}）"
         for item in requests
     )
-
-
-def _is_pipeline_file(path: str) -> bool:
-    return path == ".gitlab-ci.yml" or path.startswith((".gitlab/", "scripts/ci"))
 
 
 def _cause_text(verdict: Dict[str, Any], tail_title: str, tail_body: str) -> str:

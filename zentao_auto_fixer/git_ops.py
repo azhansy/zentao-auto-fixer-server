@@ -120,6 +120,23 @@ def changed_files(repo: Path) -> List[str]:
     return [line[3:].strip() for line in output.splitlines() if line.strip()]
 
 
+def is_pipeline_file(path: str) -> bool:
+    return path in {".gitlab-ci.yml", ".gitlab-ci.yaml", "Jenkinsfile", "azure-pipelines.yml"} or path.startswith(
+        (".gitlab/", ".github/workflows/", ".circleci/", "scripts/ci")
+    )
+
+
+def assert_no_pipeline_changes(repo: Path, baseline: str) -> None:
+    """Check both agent commits and all pending changes, including rename sources."""
+    paths = run_git(["diff", "--name-only", "--no-renames", "-z", baseline], cwd=repo,
+                    strip_output=False).split("\0")
+    paths += run_git(["ls-files", "--others", "--exclude-standard", "-z"], cwd=repo,
+                     strip_output=False).split("\0")
+    blocked = sorted({path for path in paths if is_pipeline_file(path)})
+    if blocked:
+        raise GitError("自动修复禁止修改 CI 文件：" + ", ".join(blocked))
+
+
 def reset_hard_clean(repo: Path, commit: str) -> None:
     """Throw away everything an interrupted agent attempt left behind."""
     run_git(["reset", "--hard", commit], cwd=repo)
